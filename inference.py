@@ -1,15 +1,34 @@
 #!/usr/bin/env python3
+"""
+Hailo Inference Pipeline Module
+
+This module provides a comprehensive implementation for deploying deep learning models
+on Hailo hardware accelerators. It supports both synchronous and asynchronous inference
+operations on images and video streams with various post-processing capabilities.
+
+The implementation includes:
+- Model loading and configuration
+- Input preprocessing and formatting
+- Asynchronous and synchronous inference pipelines
+- Result post-processing for classification and detection tasks
+- Support for various output formats and tensor shapes
+
+Usage:
+    python3 inference.py [image files] [options]
+"""
 
 import argparse
 import time
 from functools import partial
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union, Callable, Iterator, TypeVar
 
 import cv2
 import numpy as np
 from hailo_platform import (
     HEF,
     ConfigureParams,
+    FormatOrder,
     FormatType,
     HailoSchedulingAlgorithm,
     HailoStreamInterface,
@@ -19,35 +38,62 @@ from hailo_platform import (
     VDevice,
 )
 
-from postprocess import classification, palm_detection
+from postprocess.classification import ImagePostprocessorClassification
+from postprocess.nms_on_host import ImagePostprocessorNmsOnHost
+from postprocess.palm_detection import ImagePostprocessorPalmDetection
 
 # Configuration constants
 TIMEOUT_MS = 10000  # Timeout for asynchronous operations in milliseconds
 
+
+T = TypeVar('T')
 
 class InferPipeline:
     """
     Class to manage asynchronous and blocking inference pipelines for processing input data
     using deep learning models stored in Hailo Executable Format (HEF).
 
+    This class provides a flexible interface for loading and running inference on various
+    models with support for both synchronous and asynchronous execution modes. It handles
+    input and output tensor formatting, buffer management, and execution scheduling.
+
     Attributes:
-        out_results: Dictionary to store output results from asynchronous inference.
-        layer_name_u8: List of layer names that produce float32 format tensors as outputs.
-        layer_name_u16: List of layer names that produce uint16 format tensors as outputs.
+        out_results (dict): Dictionary to store output results from asynchronous inference.
+        layer_name_u8 (list): List of layer names that produce uint8 format tensors as outputs.
+        layer_name_u16 (list): List of layer names that produce uint16 format tensors as outputs.
+        configured_infer_model: The configured inference model ready for execution.
+        bindings: Handles input/output data bindings for the model.
+        job: Represents the current asynchronous inference job.
+        is_async (bool): Whether to use asynchronous inference mode.
+        is_callback (bool): Whether to use callbacks for asynchronous inference.
+        is_nms (bool): Whether NMS (Non-Maximum Suppression) is enabled.
+        vdevice: Virtual device instance for hardware acceleration.
     """
 
     def __init__(
-        self, net_path, batch_size, is_async, is_callback, layer_name_u8, layer_name_u16
-    ):
+        self,
+        net_path: str,
+        batch_size: int,
+        is_async: bool,
+        is_callback: bool,
+        is_nms: bool,
+        layer_name_u8: List[str],
+        layer_name_u16: List[str],
+    ) -> None:
         """
-        Initialize the InferPipeline class.
+        Initialize the InferPipeline class with model configuration and execution parameters.
 
         Args:
-            layer_name_u8 (list): Names of layers outputting float32 formatted tensors.
+            net_path (str): Path to the Hailo Executable Format (HEF) model file.
+            batch_size (int): Number of inputs to process in a single batch.
+            is_async (bool): Whether to use asynchronous inference mode.
+            is_callback (bool): Whether to use callbacks for asynchronous inference results.
+            is_nms (bool): Whether NMS (Non-Maximum Suppression) is enabled in the model.
+            layer_name_u8 (list): Names of layers outputting uint8 formatted tensors.
             layer_name_u16 (list): Names of layers outputting uint16 formatted tensors.
         """
         self.out_results = {}  # Store inference results
-        # Layers that output float32 format tensors
+        # Layers that output uint8 format tensors
         self.layer_name_u8 = layer_name_u8
         # Layers that output uint16 format tensors
         self.layer_name_u16 = layer_name_u16
@@ -57,6 +103,7 @@ class InferPipeline:
         self.job = None
         self.is_async = is_async
         self.is_callback = is_callback
+        self.is_nms = is_nms
 
         # Create VDevice and set the parameters for scheduling algorithm
         params = VDevice.create_params()
@@ -107,6 +154,7 @@ class InferPipeline:
                     self.network_group, format_type=FormatType.FLOAT32
                 )
 
+            # Setup the appropriate inference function based on is_async flag
             if self.is_async:
                 self.inference = lambda dataset: self.infer_async(dataset)
             else:
@@ -115,14 +163,20 @@ class InferPipeline:
         except Exception as e:
             print(f"Error during inference: {e}")
 
-    def close(self):
+    def close(self) -> None:
         """
-        Cleans up resources by setting the configured inference model to None
-        and releasing the associated vdevice.
+        Clean up resources used by the inference pipeline.
 
-        The method ensures that any allocated or referenced resources are
-        properly cleaned up. This is typically used as part of a teardown process
-        when an object is no longer needed, preventing resource leaks.
+        This method ensures proper cleanup of all allocated resources, including
+        the configured inference model and the virtual device. It should be called
+        when the pipeline is no longer needed to prevent resource leaks.
+
+        The method performs the following operations:
+        1. Resets the configured inference model to free associated resources
+        2. Releases the virtual device resources
+
+        This is typically used as part of a teardown process in a try-finally block
+        or when an object is no longer needed.
         """
         # Reset the configured inference model to free resources
         if self.configured_infer_model is not None:
@@ -131,13 +185,18 @@ class InferPipeline:
         # Release the vdevice resource
         self.vdevice.release()
 
-    def callback(self, completion_info):
+    def callback(self, completion_info: Any) -> None:
         """
-        Callback function to handle the completion of inference.
+        Callback function to handle the completion of asynchronous inference.
+
+        This function is invoked when an asynchronous inference operation completes.
+        It processes the results, handles any exceptions that occurred during inference,
+        and stores the output buffers in the out_results dictionary for later retrieval.
 
         Args:
-            completion_info: Contains information about the completion status, including
-                             exceptions if any occurred during inference.
+            completion_info: An object containing information about the completion status,
+                             including exceptions if any occurred during inference, and
+                             access to output buffers with inference results.
         """
         if completion_info.exception:
             # Handle exceptions that occurred during inference
@@ -145,21 +204,31 @@ class InferPipeline:
         else:
             for out_name in self.bindings._output_names:
                 # Store results from each output layer into self.out_results
-                self.out_results[out_name] = self.bindings.output(out_name).get_buffer()
+                if self.is_nms:
+                    self.out_results[out_name] = np.array(
+                        self.bindings.output(out_name).get_buffer(), dtype=object
+                    )
+                else:
+                    self.out_results[out_name] = self.bindings.output(
+                        out_name
+                    ).get_buffer()
 
-    def infer_async(self, infer_inputs):
+    def infer_async(self, infer_inputs: List[np.ndarray]) -> None:
         """
         Perform asynchronous inference on input data.
 
+        This method configures and starts an asynchronous inference operation on the provided
+        input data. It handles the setup of input and output buffers, configures the model,
+        and initiates the asynchronous inference job. Results can be retrieved later using
+        the wait_and_get_output method.
+
         Args:
-            infer_inputs (list): List of input frames for the model.
-            net_path (str): Path to the HEF (Hailo Executable Format) model file.
-            batch_size (int): Number of images processed in a single batch. Default is 1.
+            infer_inputs (list): List of input data arrays for the model.
 
         Returns:
-            infer_results (dict): Dictionary containing the inference results keyed by output layer names.
+            None: The method initiates inference but doesn't wait for results. Call
+                  wait_and_get_output() to retrieve the results after completion.
         """
-
         try:
             self.configured_infer_model = self.infer_model.configure()
 
@@ -209,37 +278,50 @@ class InferPipeline:
 
         return None
 
-    def wait_and_get_ouput(self):
+    def wait_and_get_ouput(self) -> Dict[str, np.ndarray]:
         """
-        Waits for an inference job to complete and collects the output results.
+        Wait for an asynchronous inference job to complete and collect the output results.
 
-        This function waits for a specified timeout period for the inference job
-        to finish. Once completed, it retrieves the results from the model's
-        output buffers and stores them in a dictionary keyed by output names.
+        This method blocks until either the inference job completes or the specified timeout
+        is reached. Once completed, it retrieves the inference results from the output buffers
+        and returns them as a dictionary keyed by output layer names.
 
         Returns:
-            dict: A dictionary where keys are output names of the model and values
-                are the corresponding buffers containing inference results.
+            dict: A dictionary mapping output layer names to their corresponding inference results.
+                 Each result is a numpy array with the shape and type specified during configuration.
 
         Raises:
-            Exception: If an error occurs during the waiting or result collection process,
-                    it will be caught and printed to the console.
+            Exception: If an error occurs during waiting or result collection, the exception
+                      is caught and printed to the console, and an empty dictionary is returned.
         """
         infer_results = {}
 
         try:
-            # Wait for inference to complete to retrieve results from self.out_results
+            # Wait for inference to complete with the specified timeout
             self.job.wait(TIMEOUT_MS)
 
             # Collect the final results after completion
             for index, out_name in enumerate(self.infer_model.output_names):
                 if self.is_callback:
-                    buffer = self.out_results[out_name]
+                    # For callback mode, results are already in self.out_results
+                    buffer = (
+                        np.array(self.out_results[out_name], dtype=object)
+                        if self.is_nms
+                        else self.out_results[out_name]
+                    )
                 else:
-                    # If no callback is used, manually collect results after waiting
-                    buffer = self.bindings.output(
-                        self.infer_model.output_names[index]
-                    ).get_buffer()
+                    # For no-callback mode, manually collect results after waiting
+                    if self.is_nms:
+                        buffer = np.array(
+                            self.bindings.output(
+                                self.infer_model.output_names[index]
+                            ).get_buffer(),
+                            dtype=object,
+                        )
+                    else:
+                        buffer = self.bindings.output(
+                            self.infer_model.output_names[index]
+                        ).get_buffer()
 
                 infer_results[out_name] = buffer
 
@@ -248,17 +330,20 @@ class InferPipeline:
 
         return infer_results
 
-    def infer_pipeline(self, infer_inputs):
+    def infer_pipeline(self, infer_inputs: List[np.ndarray]) -> Dict[str, np.ndarray]:
         """
-        Perform blocking inference on input data using a network group configuration.
+        Perform synchronous (blocking) inference on input data using a network group configuration.
+
+        This method executes inference in a blocking manner, waiting for the results before returning.
+        It configures virtual streams for inputs and outputs, runs the inference, and collects
+        the results immediately.
 
         Args:
-            infer_inputs (list): List of input frames for the model.
-            net_path (str): Path to the HEF (Hailo Executable Format) model file.
-            batch_size (int): Number of images processed in a single batch. Default is 1.
+            infer_inputs (list): List of input data arrays for the model.
 
         Returns:
-            infer_results (dict): Dictionary containing the inference results keyed by output layer names.
+            dict: A dictionary mapping output layer names to their corresponding inference results.
+                 Each result is a numpy array with the shape and type specified during configuration.
         """
         infer_results = {}
 
@@ -278,9 +363,15 @@ class InferPipeline:
                 for i, output_vstream_info in enumerate(
                     self.hef.get_output_vstream_infos()
                 ):
-                    infer_results[output_vstream_info.name] = buffer[
-                        output_vstream_info.name
-                    ].squeeze()
+                    if self.is_nms:
+                        infer_results[output_vstream_info.name] = np.array(
+                            buffer[output_vstream_info.name][0], dtype=object
+                        )
+                    else:
+                        # Remove batch dimension for regular outputs
+                        infer_results[output_vstream_info.name] = buffer[
+                            output_vstream_info.name
+                        ].squeeze()
 
         except Exception as e:
             print(f"Error during inference: {e}")
@@ -288,51 +379,42 @@ class InferPipeline:
         return infer_results
 
 
-def format_tensor_info(name, format, order, shape):
-    """Returns a string representation of a tensor with specified format and order.
+def format_tensor_info(
+    name: str, format: str, order: str, shape: Tuple[int, ...]
+) -> str:
+    """
+    Generate a formatted string representation of a tensor with its properties.
 
-    This function generates a formatted string that describes the structure and
-    attributes of a tensor. It is particularly useful for logging or debugging purposes,
-    where understanding tensor dimensions and types may be crucial for diagnosing issues
-    in data processing pipelines or machine learning workflows.
+    This function creates a human-readable string describing a tensor's properties including
+    its name, data format, memory order, and dimensions. The string format varies based on
+    the tensor's shape (1D, 2D, or 3D).
 
-    The function takes into account different possible shapes of the tensor, supporting:
-    - 1D tensors represented simply by their size.
-    - 2D tensors described by height and width.
-    - 3D tensors extended with channel information.
-
-    Parameters:
-        name (str): The identifier or name of the tensor.
-        format: An object representing the data format. It is assumed that this can be
-                converted to a string, where only the last segment after a dot is used.
-        order: An object representing the storage order in memory. Similar to `format`, it
-               should have a string representation with meaningful segments post-dot.
-        shape (tuple): A tuple indicating the dimensions of the tensor. Only tuples
-                       of length 1, 2, or 3 are supported.
+    Args:
+        name: The name of the tensor.
+        format: The data format type (e.g., FLOAT32, UINT8). Only the last segment after
+                the last dot in the string representation is used.
+        order: The memory layout order (e.g., NHWC, NCHW). Only the last segment after
+               the last dot in the string representation is used.
+        shape: The shape dimensions of the tensor. Must be a tuple with 1, 2, or 3 elements.
 
     Returns:
-        str: A formatted description string that includes the name, format, order, and
-             dimensional details of the tensor.
+        A formatted string describing the tensor's properties.
 
     Raises:
-        ValueError: If `shape` is not a tuple with 1, 2, or 3 elements, which ensures
-                    only valid configurations are processed.
+        ValueError: If shape is not a tuple with 1, 2, or 3 elements.
 
-    Example Use Cases:
-    - For diagnostics, when visualizing model architectures where tensor dimensions must be clear.
-    - In logging systems to record tensor metadata at various stages of data processing.
-
-    Notes on Implementation:
-    The function employs string manipulations to extract relevant segments from `format` and
-    `order`. It uses conditional checks to determine how to format the output based on the size
-    of `shape`, which allows for flexible handling of different types of tensors.
+    Example:
+        >>> format_tensor_info("input", "FormatType.FLOAT32", "FormatOrder.NHWC", (224, 224, 3))
+        'input FLOAT32, NHWC(224x224x3)'
     """
     if not isinstance(shape, tuple) or len(shape) not in [1, 2, 3]:
-        raise ValueError("tensor must be a tuple of length 1, 2 or 3")
+        raise ValueError("Shape must be a tuple of length 1, 2 or 3")
 
+    # Extract the last segment of the format and order strings (after the last dot)
     format = str(format).rsplit(".", 1)[1]
     order = str(order).rsplit(".", 1)[1]
 
+    # Format the string differently based on the tensor shape dimensionality
     if len(shape) == 3:
         H, W, C = shape[:3]
         return f"{name} {format}, {order}({H}x{W}x{C})"
@@ -344,82 +426,85 @@ def format_tensor_info(name, format, order, shape):
         return f"{name} {format}, {order}({C})"
 
 
-def validate_input_images(images, vstream_inputs):
+def validate_input_images(images: List[str], vstream_inputs: List[Any]) -> None:
     """
-    Validates that the number of input images matches the required inputs by the model.
+    Validate that the number of input images matches the required model inputs.
 
-    This function checks if the length of the provided list of images is at least
-    as long as the number of required inputs specified in `vstream_inputs`. If there are
-    fewer images than required, it raises a ValueError to indicate this mismatch.
+    This function checks if there are enough input images to satisfy the model's
+    requirements. It compares the length of the provided images list against the
+    number of input streams expected by the model.
 
-    Parameters:
-    - images (list): A list of input images that will be used by the model.
-    - vstream_inputs (list or other iterable): An object representing the expected number
-      of inputs required by the model. This could be an array-like structure where
-      each element corresponds to a required input.
+    Args:
+        images: A list of input images to be processed by the model.
+        vstream_inputs: A list of input virtual streams required by the model.
 
     Raises:
-    - ValueError: If the number of provided images is less than the number of required
-      inputs, indicating that not enough data has been supplied for processing.
-
-    Returns:
-    None: The function does not return any value. It raises an exception if validation fails.
+        ValueError: If there are fewer images than required input streams.
     """
     # Check if there are fewer images than required by the model
     if len(images) < len(vstream_inputs):
         raise ValueError(
-            "The number of input images must match the required inputs by the model."
+            f"The number of input images ({len(images)}) must match the required inputs by the model ({len(vstream_inputs)})."
         )
 
 
-def preprocess_image_from_array(image_array, shape):
-    """Resize and pad images to be input for detectors.
+def preprocess_image_from_array(
+    image_array: np.ndarray, shape: Union[Tuple[int, int], int]
+) -> Tuple[np.ndarray, Tuple[float, float], Tuple[int, int]]:
+    """
+    Resize images to target dimensions while maintaining aspect ratio.
 
-    The face and palm detector networks take 256x256 and 128x128 images
-    as input. As such, the image is resized to fit these dimensions while maintaining aspect ratio.
+    This function resizes the input image to match the target dimensions without
+    adding padding. The aspect ratio is preserved by scaling proportionally.
 
-    Parameters:
-    - image_array: numpy array representing the image.
-    - shape: tuple or integer specifying the target size (height, width).
+    Args:
+        image_array: The input image as a numpy array.
+        shape: The target dimensions as (height, width) or a single value
+               for both height and width.
 
     Returns:
-    - img: Resized image as a numpy array.
-    - scale: Scale factor between original and target sizes.
-    - pad: Pixels of padding applied in the original image.
+        A tuple containing:
+            - resized_image: The resized image.
+            - scale: Scale factors (scale_x, scale_y) between original and target sizes.
+            - pad: Padding values (0, 0) as this function does not apply padding.
     """
-
     # Determine input dimensions
     height, width = image_array.shape[:2]
     target_height, target_width = shape if isinstance(shape, tuple) else (shape, shape)
 
     # Calculate scale for resizing
-    scale0 = width / target_width
-    scale1 = height / target_height
+    scale_x = width / target_width
+    scale_y = height / target_height
 
     # Resize image using OpenCV's resize method with LANCZOS interpolation for high-quality downsampling
     img_resized = cv2.resize(
         image_array, (target_width, target_height), interpolation=cv2.INTER_LANCZOS4
     )
 
-    return img_resized, (scale0, scale1), (0, 0)
+    return img_resized, (scale_x, scale_y), (0, 0)
 
 
-def preprocess_image_from_array_with_pad(image_array, shape):
-    """Resize and pad images to be input for detectors.
+def preprocess_image_from_array_with_pad(
+    image_array: np.ndarray, shape: Union[Tuple[int, int], int]
+) -> Tuple[np.ndarray, Tuple[float, float], Tuple[int, int]]:
+    """
+    Resize and pad images to target dimensions while maintaining aspect ratio.
 
-    The face and palm detector networks take 256x256 and 128x128 images
-    as input. As such, the image is resized and padded to fit these dimensions while maintaining aspect ratio.
+    This function resizes the input image to fit within the target dimensions while
+    preserving the aspect ratio. It then pads the image with black borders to reach
+    the exact target dimensions.
 
-    Parameters:
-    - image_array: numpy array representing the image.
-    - shape: tuple or integer specifying the target size (height, width).
+    Args:
+        image_array: The input image as a numpy array (BGR format).
+        shape: The target dimensions as (height, width) or a single value
+               for both height and width.
 
     Returns:
-    - img: Resized and padded image as a numpy array.
-    - scale: Scale factor between original and target sizes.
-    - pad: Pixels of padding applied in the original image.
+        A tuple containing:
+            - padded_image: The resized and padded image (RGB format).
+            - scale: Scale factors (scale_x, scale_y) between original and target sizes.
+            - pad: Padding values (pad_height, pad_width) applied to the original image.
     """
-
     # Convert OpenCV BGR image to RGB
     image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
 
@@ -427,14 +512,15 @@ def preprocess_image_from_array_with_pad(image_array, shape):
     height, width = image_array.shape[:2]
     target_height, target_width = shape if isinstance(shape, tuple) else (shape, shape)
 
+    # Calculate resize dimensions and padding based on aspect ratio
     if height >= width:  # width <= height
-        h1 = int(target_height)
+        h1 = target_height
         w1 = int((target_height / height) * width)
         padh = 0
         padw = int((target_width - w1) / 2)
         scale = height / h1
     else:  # height < width
-        w1 = int(target_width)
+        w1 = target_width
         h1 = int((target_width / width) * height)
         padh = int((target_height - h1) / 2)
         padw = 0
@@ -457,75 +543,69 @@ def preprocess_image_from_array_with_pad(image_array, shape):
     return img_padded, (scale, scale), pad
 
 
-def format_and_print_vstream_info(vstream_infos, is_input=True):
+def format_and_print_vstream_info(vstream_infos: List[Any], is_input: bool = True) -> Iterator[Tuple[str, Tuple[int, ...], Any, Any]]:
     """
-    Formats and prints information about vstream objects.
+    Format and print information about virtual stream objects.
 
-    This function iterates over a list of vstream objects, formats their
-    details such as name, format type, order, and shape, and prints this
-    information. It also yields the name, shape, and format type of each
-    vstream object.
+    This function iterates through a list of virtual stream objects, extracts their
+    properties (name, format, order, shape), formats this information into a readable
+    string, and prints it. It also yields the properties for further processing.
 
-    Parameters:
-    - vstream_infos (list): A list of vstream objects containing attributes like
-                            name, format, and shape.
-    - is_input (bool): Flag indicating if the vstreams are inputs or outputs.
-                       Default is True (inputs).
+    Args:
+        vstream_infos: A list of virtual stream objects with attributes like
+                      name, format, and shape.
+        is_input: Flag indicating if the streams are inputs (True) or outputs (False).
+                 Default is True.
 
     Yields:
-    - tuple: A tuple containing the name, shape, and format type of each vstream.
+        A tuple containing (name, shape, format_type, order) for each virtual stream.
 
-    Returns:
-    - None
+    Example:
+        >>> for name, shape, fmt, order in format_and_print_vstream_info(inputs, is_input=True):
+        ...     print(f"Processing {name} with shape {shape}")
     """
-
     # Iterate over each vstream object with an index
     for i, vstream in enumerate(vstream_infos):
-        # Extract attributes from the vstream object
-        name = vstream.name
-        fmt_type = vstream.format.type
-        order = vstream.format.order
-        shape = vstream.shape
+        try:
+            # Extract attributes from the vstream object
+            name = vstream.name
+            fmt_type = vstream.format.type
+            order = vstream.format.order
+            shape = vstream.shape
 
-        # Format the info string based on whether it's input or output
-        info = f"{'Input' if is_input else 'Output'} #{i} {format_tensor_info(name, fmt_type, order, shape)}"
+            # Format the info string based on whether it's input or output
+            info = f"{'Input' if is_input else 'Output'} #{i} {format_tensor_info(name, fmt_type, order, shape)}"
 
-        # Print the formatted information
-        print(info)
+            # Print the formatted information
+            print(info)
 
-        # Yield a tuple of name, shape, and format type for further processing
-        yield name, shape, fmt_type
+            # Yield a tuple of name, shape, format, and order type for further processing
+            yield name, shape, fmt_type, order
+        except AttributeError as e:
+            print(f"Error processing vstream #{i}: {e}")
 
 
-def parse_args():
-    """Parse command-line arguments.
+def parse_args() -> argparse.Namespace:
+    """
+    Parse command-line arguments for the inference application.
 
-    This function is designed to facilitate the parsing of command-line inputs
-    necessary for running an asynchronous inference example. It utilizes the `argparse`
-    library to define and manage expected input parameters, providing flexibility
-    with default values and descriptions for each argument.
+    This function defines and processes command-line arguments that control the behavior
+    of the inference application, including model selection, post-processing type,
+    batch size, and synchronous/asynchronous execution mode.
 
     Returns:
-        argparse.Namespace: An object containing the parsed arguments as attributes.
+        argparse.Namespace: An object containing the parsed command-line arguments.
 
-    The function defines several command-line arguments:
-
-    - `images`: A list of image files to be processed. This is optional (`nargs="*"`),
-      allowing zero or more images to be specified at runtime.
-
-    - `-n`/`--net`: Specifies the path for the HEF model file, with a default value
-      of `"./hefs/resnet_v1_50.hef"`. This allows users to provide an alternative model without
-      altering source code.
-
-    - `-l`/`--label`: Defines the label definition file in JSON format, with a default
-      path of `"./cifar10.json"`, enabling easy integration with standard datasets or custom labels.
-
-    - `-b`/`--batch-size`: Determines the number of images processed in one batch. This
-      argument is optional and has a default value of `1`. It supports integer input, allowing
-      optimization for different processing loads while maintaining flexibility through its `required=False` setting.
-
-    The function consolidates these inputs into a namespace object, which can be easily accessed
-    throughout the application to control behavior dynamically based on user-specified parameters.
+    Command-line Arguments:
+        images: A list of image file paths to process (positional arguments).
+        -n, --net: Path to the HEF model file (default: "./hefs/resnet_v1_50.hef").
+        -p, --postprocess: Type of post-processing to apply (choices: classification,
+                          palm_detection, nanodet; default: classification).
+        -l, --label: Path to the label definition file in JSON format
+                     (default: "./postprocess/class_names_imagenet.json").
+        --asynchronous: Flag to use asynchronous inference instead of synchronous mode.
+        --callback: Flag to use callbacks with asynchronous inference (requires --asynchronous).
+        -b, --batch-size: Number of images to process in one batch (default: 1).
     """
     parser = argparse.ArgumentParser(description="Python Inference Example")
     parser.add_argument("images", nargs="*", help="Image to infer")
@@ -539,15 +619,14 @@ def parse_args():
         "-p",
         "--postprocess",
         type=str,
-        choices=["classification", "palm_detection"],
+        choices=["classification", "palm_detection", "nms_on_host"],
         default="classification",
         help="Type of post process",
     )
     parser.add_argument(
-        "-l",
-        "--label",
-        default="./postprocess/imagenet.json",
-        help="Label definition with JSON format",
+        "-c",
+        "--config",
+        help="Model definition with JSON format",
     )
     parser.add_argument(
         "--asynchronous",
@@ -571,19 +650,29 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     """
-    This function handles both image and movie files as input using OpenCV.
-    If a video file is detected, it loops through frames for inference; if an image file,
-    inference is performed once.
+    Main function to run the inference pipeline on images or video input.
 
-    Exception handling ensures graceful error reporting in case of issues during file loading
-    or processing. Additionally, resources are managed carefully to avoid leaks.
+    This function initializes the inference pipeline based on command-line arguments,
+    processes either images or video input, and displays the results. It supports both
+    synchronous and asynchronous inference modes and handles various post-processing
+    options based on the selected model type.
+
+    The function performs the following steps:
+    1. Parse command-line arguments
+    2. Load and validate the model
+    3. Initialize the inference pipeline
+    4. Process each frame from the image or video input
+    5. Apply post-processing to the inference results
+    6. Display the results
+    7. Clean up resources
+
+    Performance metrics (execution time and FPS) are calculated and printed at the end.
     """
-
     # Initialize lists to store input shapes and layer names based on output format
     input_shape = []
-    layer_name_u8 = []  # Layers that output float32 format tensors
+    layer_name_u8 = []  # Layers that output uint8 format tensors
     layer_name_u16 = []  # Layers that output uint16 format tensors
 
     # Parse command-line arguments
@@ -591,6 +680,7 @@ def main():
 
     is_async = args.asynchronous
     is_callback = False if not args.asynchronous else args.callback
+    is_nms = False
 
     try:
         # Load the model using the provided network file path
@@ -608,7 +698,7 @@ def main():
         print("VStream infos(inputs):")
 
         # Format and print input information for debugging purposes
-        for in_name, in_shape, _ in format_and_print_vstream_info(
+        for in_name, in_shape, _, _ in format_and_print_vstream_info(
             vstream_inputs, is_input=True
         ):
             if len(in_shape) < 2:
@@ -622,15 +712,17 @@ def main():
         print("VStream infos(outputs):")
 
         # Categorize layers based on their output format and store their names
-        for out_name, _, out_format in format_and_print_vstream_info(
+        for out_name, _, out_format, out_order in format_and_print_vstream_info(
             vstream_outputs, is_input=False
         ):
-            pass
+            # Assume output is only one for HAILO_NMS_BY_CLASS format order
+            if out_order == FormatOrder.HAILO_NMS_BY_CLASS:
+                is_nms = True
 
-        # TODO: Check input tensor is only one here
+        # Check input tensor is only one here
         if len(vstream_inputs) != 1:
             raise ValueError(
-                "This program is only supports the model with the single input tensor. Quitting."
+                "This program only supports models with a single input tensor. Quitting."
             )
 
         # Initialize the inference pipeline with model and processing parameters
@@ -639,6 +731,7 @@ def main():
             args.batch_size,
             is_async,
             is_callback,
+            is_nms,
             layer_name_u8,
             layer_name_u16,
         )
@@ -652,17 +745,47 @@ def main():
         cap = cv2.VideoCapture(str(image_path))
 
         if not cap.isOpened():
-            print(f"Unable to open file: {image_path}")
-            return
+            raise IOError(f"Unable to open file: {image_path}")
 
-        is_image = False if int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) > 1 else True
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        frame = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
+        _, scale, pad = preprocess_image_from_array_with_pad(frame, input_shape[0])
+
+        # Parameters for post-processing
+        params = (scale, pad)
+        # Configuration for post-processing
+        configs = args.config
+
+        # Initialize PostProcess based on the selected post-processing type
+        if args.postprocess == "nms_on_host":
+            if args.config is None:
+                # Default labels for the classes
+                configs = "./configs/yolov8.json"
+            postprocess = ImagePostprocessorNmsOnHost(params, configs)
+        elif args.postprocess == "palm_detection":
+            if args.config is None:
+                # Default parameters
+                configs = "./configs/palm_detection_full.json"
+            postprocess = ImagePostprocessorPalmDetection(params, configs)
+        elif args.postprocess == "classification":
+            if args.config is None:
+                # Default labels for the classes
+                configs = "./postprocess/class_names_imagenet.json"
+            postprocess = ImagePostprocessorClassification(params, configs, top_n=3)
+        else:
+            raise ValueError(f"Post process {args.postprocess} does not support yet.")
+
+        # Determine if the input is an image or video based on frame count
+        is_image = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) <= 1
         loop = True
         last_outputs = []
         frame_count = 0
 
         start_time = time.time()
         while loop:
-            frame_count = frame_count + 1
+            frame_count += 1
 
             ret, frame = cap.read()
 
@@ -692,18 +815,7 @@ def main():
                 # inference with current frame on device
                 out_frame = frame
                 if len(last_outputs) != 0:
-                    if args.postprocess == "palm_detection":
-                        out_frame = palm_detection.postprocess(
-                            frame, last_outputs, scale[0], pad
-                        )
-                    elif args.postprocess == "classification":
-                        out_frame = classification.postprocess(
-                            frame, last_outputs, args.label
-                        )
-                    else:
-                        raise ValueError(
-                            f"Post process {args.postprocess} does not support yet."
-                        )
+                    out_frame = postprocess.postprocess(frame, last_outputs)
 
                 # In asynchronous inference, wait for the inference on the device
                 # and extract the results from the device here
@@ -737,10 +849,11 @@ def main():
 
     end_time = time.time()
 
+    # Calculate and print performance metrics
     elapsed_time = end_time - start_time
     print(f"Function took {elapsed_time:.6f} seconds to run.")
-    fps = frame_count / elapsed_time
-    print(f"Frame count is {frame_count}, ({fps} FPS)")
+    fps = frame_count / elapsed_time if elapsed_time > 0 else 0
+    print(f"Frame count is {frame_count}, ({fps:.2f} FPS)")
 
 
 if __name__ == "__main__":
