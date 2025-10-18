@@ -19,22 +19,19 @@ Usage:
 
 import argparse
 import time
+from collections import defaultdict
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union, Callable, Iterator, TypeVar
+from typing import Any, Dict, Iterator, List, Tuple, TypeVar, Union
 
 import cv2
 import numpy as np
 from hailo_platform import (
     HEF,
-    ConfigureParams,
     FormatOrder,
     FormatType,
     HailoSchedulingAlgorithm,
-    HailoStreamInterface,
     InferVStreams,
-    InputVStreamParams,
-    OutputVStreamParams,
     VDevice,
 )
 
@@ -46,7 +43,123 @@ from postprocess.palm_detection import ImagePostprocessorPalmDetection
 TIMEOUT_MS = 10000  # Timeout for asynchronous operations in milliseconds
 
 
-T = TypeVar('T')
+T = TypeVar("T")
+
+
+class PerformanceProfiler:
+    """
+    A profiling class to measure and analyze execution times between checkpoints.
+
+    This class helps identify performance bottlenecks by tracking the time spent
+    in different stages of the inference pipeline. It collects timing data for
+    each checkpoint and provides statistical analysis (min, max, mean, variance).
+
+    Attributes:
+        checkpoints (dict): Dictionary storing lists of elapsed times for each checkpoint.
+        last_time (float): Timestamp of the last checkpoint for calculating intervals.
+        frame_start_time (float): Timestamp when frame processing started.
+    """
+
+    def __init__(self):
+        """Initialize the profiler with empty checkpoint storage."""
+        # Dictionary to store timing data: {checkpoint_name: [time1, time2, ...]}
+        self.checkpoints = defaultdict(list)
+        self.last_time = None
+        self.frame_start_time = None
+
+    def start_frame(self):
+        """
+        Mark the start of a new frame processing cycle.
+
+        This should be called at the beginning of each frame iteration to establish
+        the baseline for measuring subsequent checkpoint intervals.
+        """
+        self.frame_start_time = time.time()
+        self.last_time = self.frame_start_time
+
+    def checkpoint(self, name: str):
+        """
+        Record a checkpoint and calculate the time elapsed since the last checkpoint.
+
+        Args:
+            name (str): Identifier for this checkpoint (e.g., "preprocessing", "inference_wait").
+
+        The elapsed time is stored for later statistical analysis.
+        """
+        current_time = time.time()
+        if self.last_time is not None:
+            # Calculate time elapsed since last checkpoint
+            elapsed = current_time - self.last_time
+            self.checkpoints[name].append(elapsed)
+        self.last_time = current_time
+
+    def end_frame(self):
+        """
+        Mark the end of frame processing and record total frame time.
+
+        This calculates the total time from frame start to frame end and stores it
+        under the "total_frame_time" checkpoint.
+        """
+        if self.frame_start_time is not None:
+            total_time = time.time() - self.frame_start_time
+            self.checkpoints["total_frame_time"].append(total_time)
+
+    def print_statistics(self):
+        """
+        Print comprehensive statistics for all recorded checkpoints.
+
+        For each checkpoint, displays:
+        - Number of samples collected
+        - Minimum time (in milliseconds)
+        - Maximum time (in milliseconds)
+        - Mean time (in milliseconds)
+        - Variance (in milliseconds squared)
+
+        The statistics help identify which pipeline stages are:
+        - Consistently slow (high mean)
+        - Inconsistent (high variance)
+        - Creating bottlenecks (high max)
+        """
+        print("\n" + "=" * 80)
+        print("PERFORMANCE PROFILING RESULTS")
+        print("=" * 80)
+
+        if not self.checkpoints:
+            print("No profiling data collected.")
+            return
+
+        # Print header for the statistics table
+        print(
+            f"{'Checkpoint':<30} {'Count':>8} {'Min(ms)':>12} {'Max(ms)':>12} {'Mean(ms)':>12} {'Var(ms²)':>12}"
+        )
+        print("-" * 80)
+
+        # Calculate and display statistics for each checkpoint
+        for name, times in sorted(self.checkpoints.items()):
+            if len(times) > 0:
+                # Convert times to milliseconds for better readability
+                times_ms = np.array(times) * 1000
+                min_time = np.min(times_ms)
+                max_time = np.max(times_ms)
+                mean_time = np.mean(times_ms)
+                var_time = np.var(times_ms)
+
+                print(
+                    f"{name:<30} {len(times):>8} {min_time:>12.3f} {max_time:>12.3f} {mean_time:>12.3f} {var_time:>12.3f}"
+                )
+
+        print("=" * 80)
+
+        # Calculate and display overall throughput metrics
+        if "total_frame_time" in self.checkpoints:
+            total_times = self.checkpoints["total_frame_time"]
+            avg_frame_time = np.mean(total_times)
+            avg_fps = 1.0 / avg_frame_time if avg_frame_time > 0 else 0
+            print(f"\nAverage Frame Processing Time: {avg_frame_time * 1000:.3f} ms")
+            print(f"Average FPS (from frame time): {avg_fps:.2f}")
+
+        print("=" * 80 + "\n")
+
 
 class InferPipeline:
     """
@@ -64,7 +177,6 @@ class InferPipeline:
         configured_infer_model: The configured inference model ready for execution.
         bindings: Handles input/output data bindings for the model.
         job: Represents the current asynchronous inference job.
-        is_async (bool): Whether to use asynchronous inference mode.
         is_callback (bool): Whether to use callbacks for asynchronous inference.
         is_nms (bool): Whether NMS (Non-Maximum Suppression) is enabled.
         vdevice: Virtual device instance for hardware acceleration.
@@ -74,7 +186,6 @@ class InferPipeline:
         self,
         net_path: str,
         batch_size: int,
-        is_async: bool,
         is_callback: bool,
         is_nms: bool,
         layer_name_u8: List[str],
@@ -86,7 +197,6 @@ class InferPipeline:
         Args:
             net_path (str): Path to the Hailo Executable Format (HEF) model file.
             batch_size (int): Number of inputs to process in a single batch.
-            is_async (bool): Whether to use asynchronous inference mode.
             is_callback (bool): Whether to use callbacks for asynchronous inference results.
             is_nms (bool): Whether NMS (Non-Maximum Suppression) is enabled in the model.
             layer_name_u8 (list): Names of layers outputting uint8 formatted tensors.
@@ -101,7 +211,6 @@ class InferPipeline:
         self.configured_infer_model = None
         self.bindings = None
         self.job = None
-        self.is_async = is_async
         self.is_callback = is_callback
         self.is_nms = is_nms
 
@@ -112,53 +221,24 @@ class InferPipeline:
         try:
             self.vdevice = VDevice(params)
 
-            if self.is_async:
-                # Load the model onto the device
-                self.infer_model = self.vdevice.create_infer_model(net_path)
+            # Load the model onto the device
+            self.infer_model = self.vdevice.create_infer_model(net_path)
 
-                # Set batch size for inference operations on the loaded model
-                self.infer_model.set_batch_size(batch_size)
+            # Set batch size for inference operations on the loaded model
+            self.infer_model.set_batch_size(batch_size)
 
-                for out_name in self.infer_model.output_names:
-                    # Default output type is float32
-                    if out_name in self.layer_name_u8:
-                        self.infer_model.output(out_name).set_format_type(
-                            FormatType.UINT8
-                        )
-                    elif out_name in self.layer_name_u16:
-                        self.infer_model.output(out_name).set_format_type(
-                            FormatType.UINT16
-                        )
-                    else:
-                        self.infer_model.output(out_name).set_format_type(
-                            FormatType.FLOAT32
-                        )
-            else:
-                # Load the HEF model into device and configure it
-                self.hef = HEF(net_path)
+            for out_name in self.infer_model.output_names:
+                # Default output type is float32
+                if out_name in self.layer_name_u8:
+                    self.infer_model.output(out_name).set_format_type(FormatType.UINT8)
+                elif out_name in self.layer_name_u16:
+                    self.infer_model.output(out_name).set_format_type(FormatType.UINT16)
+                else:
+                    self.infer_model.output(out_name).set_format_type(
+                        FormatType.FLOAT32
+                    )
 
-                # Configure network groups
-                configure_params = ConfigureParams.create_from_hef(
-                    hef=self.hef, interface=HailoStreamInterface.PCIe
-                )
-                self.network_group = (
-                    self.vdevice.configure(self.hef, configure_params)
-                )[0]
-
-                # Create input and output virtual stream parameters for inference
-                self.input_vstreams_params = InputVStreamParams.make(
-                    self.network_group,
-                    format_type=FormatType.UINT8,
-                )
-                self.output_vstreams_params = OutputVStreamParams.make(
-                    self.network_group, format_type=FormatType.FLOAT32
-                )
-
-            # Setup the appropriate inference function based on is_async flag
-            if self.is_async:
-                self.inference = lambda dataset: self.infer_async(dataset)
-            else:
-                self.inference = lambda dataset: self.infer_pipeline(dataset)
+            self.configured_infer_model = self.infer_model.configure()
 
         except Exception as e:
             print(f"Error during inference: {e}")
@@ -230,8 +310,6 @@ class InferPipeline:
                   wait_and_get_output() to retrieve the results after completion.
         """
         try:
-            self.configured_infer_model = self.infer_model.configure()
-
             # Create bindings to manage input/output data buffers
             self.bindings = self.configured_infer_model.create_bindings()
 
@@ -543,7 +621,9 @@ def preprocess_image_from_array_with_pad(
     return img_padded, (scale, scale), pad
 
 
-def format_and_print_vstream_info(vstream_infos: List[Any], is_input: bool = True) -> Iterator[Tuple[str, Tuple[int, ...], Any, Any]]:
+def format_and_print_vstream_info(
+    vstream_infos: List[Any], is_input: bool = True
+) -> Iterator[Tuple[str, Tuple[int, ...], Any, Any]]:
     """
     Format and print information about virtual stream objects.
 
@@ -678,8 +758,7 @@ def main() -> None:
     # Parse command-line arguments
     args = parse_args()
 
-    is_async = args.asynchronous
-    is_callback = False if not args.asynchronous else args.callback
+    is_callback = args.callback
     is_nms = False
 
     try:
@@ -729,7 +808,6 @@ def main() -> None:
         infer = InferPipeline(
             args.net,
             args.batch_size,
-            is_async,
             is_callback,
             is_nms,
             layer_name_u8,
@@ -783,7 +861,12 @@ def main() -> None:
         last_outputs = []
         frame_count = 0
 
-        start_time = time.time()
+        # Record the overall start time for throughput calculation
+        overall_start_time = time.time()
+
+        print("\nStarting inference loop with profiling enabled...")
+        print("Press 'q' to quit (video mode only)\n")
+
         while loop:
             frame_count += 1
 
@@ -801,14 +884,11 @@ def main() -> None:
 
             try:
                 # Perform asynchronous or synchronous inference based on the argument
-                outputs = infer.inference(inference_dataset)
+                outputs = infer.infer_async(inference_dataset)
 
-                if is_image and args.asynchronous:
+                if is_image:
                     # Get inference results if image file is input, in asynchronous inference
                     last_outputs = infer.wait_and_get_ouput()
-                elif not args.asynchronous:
-                    # In synchronous inference, just move outputs to last_outputs
-                    last_outputs = outputs
 
                 # Post-process the frame with the inference results
                 # In asynchronous inference, processed last frame results while
@@ -819,7 +899,7 @@ def main() -> None:
 
                 # In asynchronous inference, wait for the inference on the device
                 # and extract the results from the device here
-                if args.asynchronous:
+                if not is_image:
                     last_outputs = infer.wait_and_get_ouput()
 
             except Exception as e:
@@ -847,13 +927,23 @@ def main() -> None:
             cap.release()
             cv2.destroyAllWindows()
 
-    end_time = time.time()
+    # Calculate overall performance metrics
+    overall_end_time = time.time()
+    overall_elapsed_time = overall_end_time - overall_start_time
 
-    # Calculate and print performance metrics
-    elapsed_time = end_time - start_time
-    print(f"Function took {elapsed_time:.6f} seconds to run.")
-    fps = frame_count / elapsed_time if elapsed_time > 0 else 0
-    print(f"Frame count is {frame_count}, ({fps:.2f} FPS)")
+    # Print basic performance summary
+    if not is_image:
+        print("\n" + "=" * 80)
+        print("BASIC PERFORMANCE SUMMARY")
+        print("=" * 80)
+        print(f"Total execution time: {overall_elapsed_time:.6f} seconds")
+        print(f"Total frames processed: {frame_count}")
+
+        if overall_elapsed_time > 0:
+            overall_fps = frame_count / overall_elapsed_time
+            print(f"Overall throughput: {overall_fps:.2f} FPS")
+
+        print("=" * 80)
 
 
 if __name__ == "__main__":
