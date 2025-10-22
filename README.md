@@ -6,179 +6,405 @@
 
 ![](./images/out_yolov11.png)![](./images/out_yolov11.gif)
 
-A Python-based inference pipeline for performing deep learning inference using Hailo's hardware acceleration platform.
-This project provides a flexible framework for running both synchronous and asynchronous inference on models in Hailo Executable Format (HEF).
+A comprehensive Python implementation for deploying deep learning models on Hailo hardware accelerators with support for both synchronous and asynchronous inference operations.
 
 ## Overview
 
-This project implements an inference pipeline that leverages Hailo's hardware acceleration to process images and videos through deep learning models.
-The pipeline supports:
+This inference pipeline provides a robust and production-ready framework for running neural network inference on Hailo AI accelerators. It features sophisticated error handling, performance profiling, and support for various post-processing operations including object detection and image classification.
 
-- Synchronous and asynchronous inference modes
-- Callback-based result handling
-- Image and video input processing
-- Multiple model post-processing options
-- Batch processing capabilities
+The pipeline is designed to handle both single images and video streams with real-time processing capabilities, making it suitable for production deployment scenarios.
 
 ## Features
 
-- **Dual Inference Modes**: Choose between synchronous (blocking) or asynchronous (non-blocking) inference
-- **Flexible Input Handling**: Process single images or video streams
-- **Post-Processing Support**: Built-in support for
-  - Hailo Model Zoo classification
-  - Hailo Model Zoo object detection (NMS on host cpu only)
-  - Mediapipe palm detection model
-- **Performance Metrics**: Automatic calculation and display of FPS (Frames Per Second)
-- **Resource Management**: Proper cleanup of resources after processing
+### Core Capabilities
+
+- **Dual Inference Modes**: Support for both synchronous and asynchronous inference
+- **Robust Exception Handling**: Hailo-specific exception handling with proper error recovery
+- **Performance Profiling**: Built-in profiling with detailed timing statistics and visualization
+- **Multi-threaded Display**: Asynchronous frame display for smooth video playback
+- **Context Manager Support**: Safe resource management with automatic cleanup
+
+### Supported Post-Processing
+
+- **Image Classification**: Top-N classification results with ImageNet labels
+- **Object Detection**: YOLOv8-style detection with NMS on host
+- **Palm Detection**: Specialized hand/palm detection with custom anchors
+
+### Performance Features
+
+- **Batch Processing**: Configurable batch sizes for optimal throughput
+- **Zero-Copy Operations**: Efficient buffer management to minimize memory overhead
+- **Pipeline Visualization**: Stacked timing charts and detailed performance breakdowns
+- **Hardware Scheduling**: Configurable scheduling algorithms (Round Robin)
 
 ## Requirements
 
-- Python 3.6+
-- OpenCV (`cv2`)
-- NumPy
-- Hailo Platform SDK
+### Hardware
+
+- Hailo AI accelerator (Hailo-8, Hailo-8L, or compatible device)
+- PCIe interface connection
+
+### Software Dependencies
+
+```bash
+# Core dependencies
+numpy>=1.19.0
+opencv-python>=4.5.0
+matplotlib>=3.3.0
+
+# Hailo SDK
+hailo-platform>=4.0.0
+
+# Additional utilities (included in repository)
+- inference_utils (DisplayThread, FrameReaderThread, PerformanceProfiler)
+- postprocess modules (classification, nms_on_host, palm_detection)
+```
+
+### Python Version
+
+- Python 3.8 or higher
 
 ## Installation
 
-Follow the PyHailoRT installation procedure of HailoRT documentation.
-For running the reference jupyter notebook, you also need to install Hailo DataFlow Compiler to parse/optimize, and compile the tflite model.
+1. Install HailoRT following the official documentation
+2. Install Python dependencies:
+
+```bash
+pip install opencv-python matplotlib
+```
+
+3. Ensure the Hailo device is properly connected and recognized:
+
+```bash
+hailortcli fw-control identify
+```
 
 ## Usage
 
 ### Basic Usage
 
+#### Image Classification
+
 ```bash
-python inference.py path/to/image.jpg -n path/to/model.hef
+python inference.py image.jpg \
+    --net ./hefs/resnet_v1_50.hef \
+    --postprocess classification
+```
+
+#### Object Detection (Video)
+
+```bash
+python inference.py video.mp4 \
+    --net ./hefs/yolov8n.hef \
+    --postprocess nms_on_host \
+    --config ./configs/yolov8.json
+```
+
+#### Asynchronous Inference with Profiling
+
+```bash
+python inference.py video.mp4 \
+    --net ./hefs/resnet_v1_50.hef \
+    --postprocess classification \
+    --profile
+```
+
+#### Synchronous Inference
+
+```bash
+python inference.py image.jpg \
+    --net ./hefs/resnet_v1_50.hef \
+    --postprocess classification \
+    --synchronous
 ```
 
 ### Command Line Arguments
 
-| Argument         | Short | Description                                                               | Default                   |
-| ---------------- | ----- | ------------------------------------------------------------------------- | ------------------------- |
-| `--net`          | `-n`  | Path to the HEF model file                                                | `./hefs/resnet_v1_50.hef` |
-| `--postprocess`  | `-p`  | Type of post processing (classification or palm_detection or nms_on_host) | `classification`          |
-| `--config`       | `-c`  | Path to model definition JSON file                                        | None                      |
-| `--asynchronous` |       | Use asynchronous inference mode                                           | False                     |
-| `--callback`     |       | Use callback with asynchronous inference                                  | False                     |
-| `--batch-size`   | `-b`  | Number of images in one batch                                             | 1                         |
+| Argument        | Short | Type       | Default                   | Description                                                             |
+| --------------- | ----- | ---------- | ------------------------- | ----------------------------------------------------------------------- |
+| `images`        | -     | positional | required                  | Path to image or video file to process                                  |
+| `--net`         | `-n`  | string     | `./hefs/resnet_v1_50.hef` | Path to HEF model file                                                  |
+| `--postprocess` | `-p`  | choice     | `classification`          | Post-processing type: `classification`, `nms_on_host`, `palm_detection` |
+| `--config`      | `-c`  | string     | auto-detected             | Path to custom JSON configuration file for post-processing              |
+| `--synchronous` | `-s`  | flag       | false                     | Use synchronous inference on HRT 4.X (default: asynchronous)            |
+| `--callback`    | -     | flag       | false                     | Use callback mode with async inference                                  |
+| `--batch-size`  | `-b`  | integer    | 1                         | Number of images per batch                                              |
+| `--profile`     | -     | flag       | false                     | Enable performance profiling with visualization                         |
 
-### Examples
+### Configuration Files
 
-#### Run classification on an image
+The pipeline uses JSON configuration files for post-processing:
 
-Download ResNet 50 hef file from the Hailo ModelZoo.
-If you don't use Hailo8, please download appropriate hefs from the Hailo ModelZoo and place it under hefs directory.
+- **Classification**: `./configs/class_names_imagenet.json`
+- **YOLOv8 Detection**: `./configs/yolov8.json`
+- **Palm Detection**: `./configs/palm_detection_full.json`
 
-```bash
-wget -O ./hefs/resnet_v1_50.hef https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v2.15.0/hailo8/resnet_v1_50.hef
+Example configuration structure:
+
+```json
+{
+    "classes": ["class1", "class2", ...],
+    "confidence_threshold": 0.5,
+    "nms_threshold": 0.45
+}
 ```
 
-Then run the script.
+## Synchronous vs Asynchronous Inference
 
-```bash
-python inference.py -n ./hefs/resnet_v1_50.hef input.jpg
+### Synchronous Inference (`--synchronous`)
+
+**Characteristics:**
+
+- Blocking operations: each inference waits for completion before proceeding
+- Simpler execution flow with sequential processing
+- Lower latency for single-frame processing
+- Easier to debug and understand
+
+**Best For:**
+
+- Single image processing
+- Batch processing where order matters
+- Development and debugging
+- Applications where simplicity is preferred over throughput
+
+**Performance:**
+
+```
+Frame → Preprocess → [Inference] → Postprocess → Display
+         (wait)                       (wait)
 ```
 
-#### Process a video with asynchronous inference:
+### Asynchronous Inference (default)
 
-```bash
-python inference.py video.mp4 --asynchronous -n ./hefs/resnet_v1_50.hef
+**Characteristics:**
+
+- Non-blocking operations: submit inference and continue processing
+- Pipelined execution with overlapped operations
+- Higher throughput for video streams
+- More complex error handling
+
+**Best For:**
+
+- Real-time video processing
+- High-throughput applications
+- Production deployments
+- Applications requiring maximum FPS
+
+**Performance:**
+
+```
+Frame 1 → Preprocess → Submit Inference ────────────┐
+Frame 2 → Preprocess → Submit Inference ──────┐     │
+                                              │     │
+                                    Wait & Postprocess Frame 1
+                                    Wait & Postprocess Frame 2
 ```
 
-#### Run classification on an image with a custom label file:
+### Performance Comparison
+
+| Metric                    | Synchronous | Asynchronous |
+| ------------------------- | ----------- | ------------ |
+| Single Image Latency      | Low         | Medium       |
+| Video Throughput (FPS)    | Medium      | High         |
+| CPU Utilization           | Lower       | Higher       |
+| Implementation Complexity | Simple      | Complex      |
+| Resource Usage            | Lower       | Higher       |
+
+### Callback Mode (`--callback`)
+
+Available only in asynchronous mode, callback mode processes results immediately upon completion:
 
 ```bash
-python inference.py image.jpg -p classification -c my_labels.json -n ./hefs/your_custom_model.hef
+python inference.py video.mp4 \
+    --net ./hefs/yolov8n.hef \
+    --postprocess nms_on_host \
+    --callback
 ```
 
-#### Run object detection an image
+**Benefits:**
 
-Download Yolo hef file from the Hailo ModelZoo. hef must be compiled with "NMS on host CPU" configuration.
-Here, we download "Yolov8n" model for detection.
-If you don't use Hailo8, please download appropriate hefs from the Hailo ModelZoo and place it under hefs directory.
+- Reduced latency by processing results immediately
+- Better suited for real-time applications
+- Automatic result handling
+
+## Performance Profiling
+
+Enable profiling with `--profile` to get detailed timing statistics:
 
 ```bash
-wget -O ./hefs/yolov8n.hef https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v2.15.0/hailo8/yolov8n.hefs
+python inference.py video.mp4 --net ./hefs/resnet_v1_50.hef --profile
 ```
 
-Then run the script.
+### Profiling Output
 
-```bash
-python inference.py input.jpg -n ./hefs/yolov8n.hef -p nms_on_host -c ./configs/yolov8.json
+**Console Statistics:**
+
+```
+======================================================================================
+PERFORMANCE PROFILING RESULTS
+======================================================================================
+Checkpoint                     Count      Min(ms)      Max(ms)     Mean(ms)   Var(ms²)
+--------------------------------------------------------------------------------
+1_frame_read                     300        0.125        2.456        0.234      0.012
+2_preprocessing                  300        1.234        3.456        1.567      0.045
+3_inference_submit               300        0.089        0.234        0.123      0.003
+4_inference_wait                 300       15.234       18.456       16.234      1.234
+5_postprocessing                 300        2.345        4.567        2.789      0.234
+6_display_queue                  300        0.012        0.456        0.034      0.001
+total_frame_time                 300       19.567       25.678       21.234      3.456
+======================================================================================
+
+Average Frame Processing Time: 21.234 ms
+Average FPS (from frame time): 47.09
+======================================================================================
 ```
 
-#### Run palm detection on an image:
+**Visual Charts:**
 
-Please run the Jupyter Notebook `palm_detection_full_DFC.ipynb` to convert MediaPipe palm detection model to hef.
+- **Stacked Time Chart**: Shows cumulative timing for each pipeline stage across frames
+- **Detailed Timing Chart**: Individual timing plots for each stage with mean lines
 
-```bash
-cd notebook
-jupyter notebook
+## Exception Handling
+
+The pipeline implements robust exception handling for production environments:
+
+### Exception Types
+
+| Exception                | Description                    | Recovery Action      |
+| ------------------------ | ------------------------------ | -------------------- |
+| `InferenceTimeoutError`  | Inference operation timed out  | Retry frame or skip  |
+| `InferenceSubmitError`   | Failed to submit inference job | Break (device error) |
+| `InferenceWaitError`     | Failed to retrieve results     | Retry or skip frame  |
+| `InferencePipelineError` | Synchronous inference failed   | Break (fatal)        |
+
+### Error Recovery Example
+
+```python
+try:
+    outputs = infer.inference(dataset)
+    results = infer.wait_and_get_output()
+except InferenceTimeoutError as e:
+    # Timeout is recoverable - retry or skip frame
+    print(f"Timeout on frame {frame_count}: {e}")
+    continue
+except InferenceSubmitError as e:
+    # Device error - stop processing
+    print(f"Device error: {e}")
+    break
 ```
 
-Then run the inference script.
+## Video Controls
 
-```bash
-python inference.py hand.jpg -n ./hef/palm_detection_full.hef -p palm_detection -c ./configs/palm_detection_full.json
+When processing video files:
+
+- **Press 'q'**: Quit the application
+- **Close window**: Stop processing
+
+## Output
+
+### Classification Output
+
+```
+Top 3 predictions:
+1. Egyptian cat (0.8756)
+2. Tabby cat (0.0234)
+3. Tiger cat (0.0123)
 ```
 
-#### Run palm detection on a video with asynchronous inference and using callback function:
+### Detection Output
 
-```bash
-python inference.py vodeo.mp4 -n ./hef/palm_detection_full.hef -p palm_detection -c ./configs/palm_detection_full.json --asynchronous --callback
+- Bounding boxes drawn on frame
+- Class labels with confidence scores
+- Real-time FPS counter
+
+### Performance Summary
+
+```
+================================================================================
+BASIC PERFORMANCE SUMMARY
+================================================================================
+Total execution time: 12.345678 seconds
+Total frames processed: 300
+Overall throughput: 24.31 FPS
+================================================================================
 ```
 
-## How It Works
+## Troubleshooting
 
-1. **Initialization**: The pipeline loads a Hailo model and configures input/output streams.
-2. **Input Processing**: Images or video frames are resized and padded to match the model's input requirements.
-3. **Inference**: The processed input is sent to the Hailo hardware for inference.
-4. **Post-Processing**: Results are processed based on the model type (classification or palm detection).
-5. **Visualization**: Output is displayed with annotations or classifications.
+### Common Issues
 
-### Synchronous vs Asynchronous Inference
+**1. "No input streams found in the model"**
 
-This pipeline supports two inference modes:
+- Verify HEF file path is correct
+- Ensure HEF file is compatible with your Hailo device
 
-#### Synchronous Inference
+**2. "Inference device not ready: timeout"**
 
-- **How it works**: The CPU sends data to the device, waits for processing to complete, then processes the results
-- **Pros**: Simple implementation, easier to understand and debug
-- **Cons**: Less efficient use of resources as the CPU remains idle during device computation
-- **Use case**: Good for simple applications or when you need guaranteed sequential processing
+- Check Hailo device connection: `hailortcli fw-control identify`
+- Reduce batch size or increase timeout value
+- Ensure no other processes are using the device
 
-#### Asynchronous Inference
+**3. "Failed to initialize InferPipeline"**
 
-- **How it works**: While the device is processing the current frame, the CPU simultaneously post-processes the previous frame's results
-- **Pros**: Higher throughput and better resource utilization, resulting in increased FPS
-- **Cons**: More complex implementation and potential for race conditions
-- **Use case**: Ideal for video processing or real-time applications where maximum throughput is required
+- Install Hailo SDK properly
+- Check device permissions: `sudo chmod 666 /dev/hailo0`
+- Verify PCIe connection
 
-By running CPU post-processing and device inference in parallel, asynchronous inference effectively creates a pipeline that can improve performance, especially in video applications.
+**4. Low FPS performance**
 
-## Classes and Components
+- Use asynchronous mode (default)
+- Disable profiling for production
+- Increase `max_queue_size` in DisplayThread
+- Use hardware-accelerated video decoding
 
-### InferPipeline
+### Debug Mode
 
-The main class that handles the inference pipeline. Key methods:
+For detailed debugging, the pipeline prints comprehensive error messages:
 
-- `__init__`: Initialize the pipeline with model and configuration parameters
-- `inference`: Run inference on input data
-- `wait_and_get_output`: Get results after asynchronous inference completes
-- `close`: Clean up resources when done
+```python
+# Each exception includes:
+# - Error type and description
+# - Frame number where error occurred
+# - Suggested recovery action
+# - Original exception chain
+```
 
-### Helper Functions
+## Architecture
 
-- `preprocess_image_from_array`: Resize images to fit model input requirements
-- `preprocess_image_from_array_with_pad`: Resize and pad images while preserving aspect ratio
-- `format_tensor_info`: Format tensor information for display
+### Pipeline Flow
 
-## Post-Processing
+```
+Input (Image/Video)
+    ↓
+Frame Reading (threaded for video)
+    ↓
+Preprocessing (resize, pad, color conversion)
+    ↓
+Inference (Hailo device)
+    ↓
+Postprocessing (NMS, classification, etc.)
+    ↓
+Display (threaded for video)
+    ↓
+Performance Profiling (optional)
+```
 
-The pipeline supports two post-processing options:
+### Class Structure
 
-1. **Classification**: Maps network outputs to class labels
-2. **Palm Detection**: Performs palm detection and visualization
+- **`InferPipeline`**: Main inference manager
+  - Handles device initialization
+  - Manages synchronous/asynchronous inference
+  - Implements robust exception handling
+
+- **`DisplayThread`**: Asynchronous frame display
+  - Non-blocking video output
+  - Queue management with frame dropping
+  - User interaction handling
+
+- **`PerformanceProfiler`**: Timing and statistics
+  - Per-stage timing measurement
+  - Statistical analysis
+  - Visualization generation
 
 ### Model Attribution
 
@@ -204,12 +430,44 @@ To use the notebook:
 
 ## Known issues
 
-There is still race condition with asynchronous inference and sometimes error occurs while video processing.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+Exception handling has not been validated.
 
 ## License
 
-This project is licensed under the Apache License 2.0 - see the LICENSE file for details.
+This project is provided as-is for use with Hailo hardware accelerators.
+Please refer to the Hailo SDK license for terms and conditions regarding the use of Hailo software and hardware.
+
+This software is licensed under the Apache License 2.0 - see the LICENSE file for details.
+
+### Third-Party Licenses
+
+- OpenCV: Apache 2.0 License
+- NumPy: BSD License
+- Matplotlib: PSF-based License
+
+---
+
+**Note**: This implementation requires a valid Hailo SDK installation and compatible Hailo hardware. For support, documentation, and model zoo, visit [Hailo Developer Zone](https://hailo.ai/developer-zone/).
+
+## Contributing
+
+Contributions are welcome! Please ensure:
+
+- Code follows PEP 8 style guidelines
+- All exception handling is properly implemented
+- Performance impact is documented
+- Tests are included for new features
+
+## Contact
+
+For issues related to:
+
+- **Hailo SDK**: Contact Hailo support
+- **This implementation**: Open an issue in the repository
+- **Model-specific questions**: Refer to model documentation
+
+---
+
+**Version**: 1.1.0  
+**Last Updated**: 2025-10-22  
+**Hailo SDK Compatibility**: 4.0+

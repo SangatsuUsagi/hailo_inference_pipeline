@@ -1,56 +1,65 @@
-#!/usr/bin/env python3
+"""
+Palm Detection Post-processing Module
+
+This module provides functionality for post-processing palm detection model outputs,
+including visualization of detection results and region of interest (ROI) extraction.
+"""
 
 import json
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple
 
 import cv2
 import numpy as np
-
-"""
-Based on code from :
-https://github.com/AlbertaBeef/blaze_app_python/blob/main/blaze_common/blazebase.py
-"""
+from numpy.typing import NDArray
 
 
 class ImagePostprocessorPalmDetection:
     """
-    A class to handle the postprocessing of palm detection outputs.
+    Post-processor for palm detection model outputs.
 
-    This class handles anchor generation, detection filtering, coordinate normalization,
-    and visualization of palm detection results on input images.
-
-    Attributes:
-        scale (float): Scaling factor used during preprocessing.
-        pad (tuple): Padding values (x, y) used during preprocessing.
-        model_configs (dict): Configuration parameters for the palm detection model.
-        anchors (np.ndarray): Generated anchor boxes used for decoding model outputs.
+    This class handles the post-processing of palm detection model outputs,
+    including detection box decoding, non-maximum suppression, and visualization.
+    It also provides functionality to extract regions of interest (ROIs) for
+    subsequent hand landmark detection.
     """
+
+    scale: float
+    pad: Tuple[float, float]
+    anchors: NDArray[np.float32]
+    model_configs: Dict[str, Any]
 
     def __init__(
         self, params: Tuple[Tuple[float, float], Tuple[float, float]], configs: str
-    ):
+    ) -> None:
         """
-        Initialize the palm detection postprocessor with scaling and padding information.
+        Initialize the palm detection post-processor.
 
-        Parameters:
-            params (tuple): A tuple containing ((x_scale, y_scale), (x_pad, y_pad))
-            configs (str): Path to the JSON configuration file containing model information.
+        Args:
+            params: A tuple containing scale and padding information.
+                   params[0][0]: Scale factor for image preprocessing
+                   params[1]: Padding values (height, width)
+            configs: Path to the JSON configuration file containing model parameters
+                     and anchor generation options.
+
+        Raises:
+            FileNotFoundError: If the configuration file is not found.
+            ValueError: If there's an error decoding the JSON file.
         """
 
         def calculate_scale(
             min_scale: float, max_scale: float, stride_index: int, num_strides: int
         ) -> float:
             """
-            Calculate the scale for a specific stride index.
+            Calculate the scale for anchor boxes based on stride index.
 
-            Parameters:
-                min_scale (float): Minimum scale value.
-                max_scale (float): Maximum scale value.
-                stride_index (int): Current stride index.
-                num_strides (int): Total number of strides.
+            Args:
+                min_scale: Minimum scale value
+                max_scale: Maximum scale value
+                stride_index: Current stride index
+                num_strides: Total number of strides
 
             Returns:
-                float: Calculated scale value.
+                Calculated scale value
             """
             if num_strides == 1:
                 return (max_scale + min_scale) * 0.5
@@ -59,19 +68,15 @@ class ImagePostprocessorPalmDetection:
                     num_strides - 1.0
                 )
 
-        def generate_anchors(options: Dict[str, Any]) -> np.ndarray:
+        def generate_anchors(options: Dict[str, Any]) -> NDArray[np.float32]:
             """
-            Generate anchor boxes based on specified options.
+            Generate anchor boxes based on provided options.
 
-            Parameters:
-                options (dict): Dictionary containing anchor generation parameters.
-                    Expected keys: strides, num_layers, min_scale, max_scale,
-                    reduce_boxes_in_lowest_layer, aspect_ratios, interpolated_scale_aspect_ratio,
-                    input_size_height, input_size_width, anchor_offset_x, anchor_offset_y,
-                    fixed_anchor_size
+            Args:
+                options: Dictionary containing anchor generation parameters
 
             Returns:
-                np.ndarray: Generated anchor boxes.
+                Numpy array of generated anchors
             """
             strides_size = len(options["strides"])
             assert options["num_layers"] == strides_size
@@ -84,7 +89,7 @@ class ImagePostprocessorPalmDetection:
                 aspect_ratios = []
                 scales = []
 
-                # For same strides, we merge the anchors in the same order.
+                # Process layers with the same stride
                 last_same_stride_layer = layer_id
                 while (last_same_stride_layer < strides_size) and (
                     options["strides"][last_same_stride_layer]
@@ -97,11 +102,11 @@ class ImagePostprocessorPalmDetection:
                         strides_size,
                     )
 
+                    # Special handling for the lowest layer
                     if (
                         last_same_stride_layer == 0
                         and options["reduce_boxes_in_lowest_layer"]
                     ):
-                        # For first layer, it can be specified to use predefined anchors.
                         aspect_ratios.append(1.0)
                         aspect_ratios.append(2.0)
                         aspect_ratios.append(0.5)
@@ -109,10 +114,12 @@ class ImagePostprocessorPalmDetection:
                         scales.append(scale)
                         scales.append(scale)
                     else:
+                        # Add anchors for all aspect ratios
                         for aspect_ratio in options["aspect_ratios"]:
                             aspect_ratios.append(aspect_ratio)
                             scales.append(scale)
 
+                        # Add an additional anchor if interpolated_scale_aspect_ratio is specified
                         if options["interpolated_scale_aspect_ratio"] > 0.0:
                             scale_next = (
                                 1.0
@@ -131,11 +138,13 @@ class ImagePostprocessorPalmDetection:
 
                     last_same_stride_layer += 1
 
+                # Calculate anchor dimensions based on scales and aspect ratios
                 for i in range(len(aspect_ratios)):
                     ratio_sqrts = np.sqrt(aspect_ratios[i])
                     anchor_height.append(scales[i] / ratio_sqrts)
                     anchor_width.append(scales[i] * ratio_sqrts)
 
+                # Create anchors for the current feature map
                 stride = options["strides"][layer_id]
                 feature_map_height = int(np.ceil(options["input_size_height"] / stride))
                 feature_map_width = int(np.ceil(options["input_size_width"] / stride))
@@ -143,6 +152,7 @@ class ImagePostprocessorPalmDetection:
                 for y in range(feature_map_height):
                     for x in range(feature_map_width):
                         for anchor_id in range(len(anchor_height)):
+                            # Calculate anchor center positions
                             x_center = (
                                 x + options["anchor_offset_x"]
                             ) / feature_map_width
@@ -161,61 +171,56 @@ class ImagePostprocessorPalmDetection:
 
                 layer_id = last_same_stride_layer
 
-            anchors = np.asarray(anchors)
-
+            anchors = np.asarray(anchors, dtype=np.float32)
             return anchors
 
-        # Extract scale and padding from params
-        self.scale = params[0][0]  # x_scale
-        self.pad = params[1]  # (x_pad, y_pad)
+        # Initialize instance variables
+        self.scale = params[0][0]
+        self.pad = params[1]
 
-        # Read model configuration and anchor from json file
+        # Load model configuration
         try:
             with open(configs, "r", encoding="utf-8") as f:
                 model_info = json.load(f)
         except FileNotFoundError:
             raise FileNotFoundError(
-                f"Configuration file not found at path: {json}. Please provide the correct path."
+                f"Configuration file not found at path: {configs}. Please provide the correct path."
             )
         except json.JSONDecodeError:
             raise ValueError("Error decoding the label JSON file.")
 
-        # Generate anchor boxes based on configuration options
+        # Generate anchors based on model configuration
         self.anchors = generate_anchors(model_info[0])
-
-        # Palm detection configration is listed with anchor and model dictionaties
         self.model_configs = model_info[1]
 
-    def _weighted_non_max_suppression(self, detections: np.ndarray) -> List[np.ndarray]:
+    def _weighted_non_max_suppression(
+        self, detections: NDArray[np.float32]
+    ) -> List[NDArray[np.float32]]:
         """
-        Alternative NMS method as mentioned in the BlazeFace paper.
+        Apply weighted non-maximum suppression to detections.
 
-        This method estimates the regression parameters of a bounding box as a weighted
-        mean between the overlapping predictions, rather than using traditional suppression.
+        This method suppresses overlapping detections by using a weighted average
+        of overlapping boxes rather than picking a single box.
 
-        Parameters:
-            detections (np.ndarray): Detection tensor of shape (count, 17+).
-                The first 4 values in each detection are the bounding box coordinates.
-                The value at index num_coords is the score.
+        Args:
+            detections: Array of detection boxes and scores
 
         Returns:
-            list: A list of filtered detections after blending overlapping predictions.
-
-        Reference:
-            mediapipe/calculators/util/non_max_suppression_calculator.cc
-            mediapipe/calculators/util/non_max_suppression_calculator.proto
+            List of filtered detections after non-maximum suppression
         """
 
-        def intersect(box_a: np.ndarray, box_b: np.ndarray) -> np.ndarray:
+        def intersect(
+            box_a: NDArray[np.float32], box_b: NDArray[np.float32]
+        ) -> NDArray[np.float32]:
             """
-            Compute the intersection area between box_a and box_b.
+            Calculate the intersection area between boxes.
 
-            Parameters:
-                box_a (np.ndarray): First set of boxes, shape [A,4].
-                box_b (np.ndarray): Second set of boxes, shape [B,4].
+            Args:
+                box_a: First set of boxes
+                box_b: Second set of boxes
 
             Returns:
-                np.ndarray: Intersection areas, shape [A,B].
+                Array of intersection areas
             """
             A = box_a.shape[0]
             B = box_b.shape[0]
@@ -230,16 +235,18 @@ class ImagePostprocessorPalmDetection:
             inter = np.clip((max_xy - min_xy), 0, None)
             return inter[:, :, 0] * inter[:, :, 1]
 
-        def jaccard(box_a: np.ndarray, box_b: np.ndarray) -> np.ndarray:
+        def jaccard(
+            box_a: NDArray[np.float32], box_b: NDArray[np.float32]
+        ) -> NDArray[np.float32]:
             """
-            Compute the Jaccard overlap (IoU) of two sets of boxes.
+            Calculate the Jaccard index (IoU) between boxes.
 
-            Parameters:
-                box_a (np.ndarray): First set of boxes, shape [A,4].
-                box_b (np.ndarray): Second set of boxes, shape [B,4].
+            Args:
+                box_a: First set of boxes
+                box_b: Second set of boxes
 
             Returns:
-                np.ndarray: Jaccard overlap values, shape [A,B].
+                Array of IoU values
             """
             inter = intersect(box_a, box_b)
             area_a = np.repeat(
@@ -248,57 +255,55 @@ class ImagePostprocessorPalmDetection:
                 ),
                 inter.shape[1],
                 axis=1,
-            )  # [A,B]
+            )
             area_b = np.repeat(
                 np.expand_dims(
                     (box_b[:, 2] - box_b[:, 0]) * (box_b[:, 3] - box_b[:, 1]), axis=0
                 ),
                 inter.shape[0],
                 axis=0,
-            )  # [A,B]
+            )
             union = area_a + area_b - inter
-            return inter / union  # [A,B]
+            return inter / union
 
-        def overlap_similarity(box: np.ndarray, other_boxes: np.ndarray) -> np.ndarray:
+        def overlap_similarity(
+            box: NDArray[np.float32], other_boxes: NDArray[np.float32]
+        ) -> NDArray[np.float32]:
             """
-            Compute the IoU between a bounding box and set of other boxes.
+            Calculate IoU between one box and multiple other boxes.
 
-            Parameters:
-                box (np.ndarray): Single box, shape [4].
-                other_boxes (np.ndarray): Set of boxes to compare against, shape [N,4].
+            Args:
+                box: Single box
+                other_boxes: Multiple boxes
 
             Returns:
-                np.ndarray: IoU values between the box and all other_boxes.
+                Array of IoU values
             """
             return jaccard(np.expand_dims(box, axis=0), other_boxes).squeeze(0)
 
+        # Handle empty detections case
         if len(detections) == 0:
             return []
 
-        output_detections = []
-
-        # Sort the detections from highest to lowest score.
-        # argsort() returns ascending order, therefore read the array from end
+        output_detections: List[NDArray[np.float32]] = []
+        # Sort detections by score (highest first)
         remaining = np.argsort(detections[:, self.model_configs["num_coords"]])[::-1]
 
+        # Process detections until none remain
         while len(remaining) > 0:
             detection = detections[remaining[0]]
 
-            # Compute the overlap between the first box and the other
-            # remaining boxes. (Note that the other_boxes also include
-            # the first_box.)
+            # Calculate IoU between first box and all other boxes
             first_box = detection[:4]
             other_boxes = detections[remaining, :4]
             ious = overlap_similarity(first_box, other_boxes)
 
-            # If two detections don't overlap enough, they are considered
-            # to be from different faces.
+            # Identify overlapping boxes
             mask = ious > self.model_configs["min_suppression_threshold"]
             overlapping = remaining[mask]
             remaining = remaining[~mask]
 
-            # Take an average of the coordinates from the overlapping
-            # detections, weighted by their confidence scores.
+            # Apply weighted average for overlapping boxes
             weighted_detection = detection.copy()
             if len(overlapping) > 1:
                 coordinates = detections[
@@ -320,77 +325,74 @@ class ImagePostprocessorPalmDetection:
 
         return output_detections
 
-    def denormalize_detections(self, detections: np.ndarray) -> np.ndarray:
+    def denormalize_detections(
+        self, detections: NDArray[np.float32]
+    ) -> NDArray[np.float32]:
         """
-        Maps detection coordinates from [0,1] to original image coordinates.
+        Convert normalized detection coordinates to image coordinates.
 
-        The face and palm detector networks take 256x256 and 128x128 images
-        as input. As such the input image is padded and resized to fit the
-        size while maintaining the aspect ratio. This function maps the
-        normalized coordinates back to the original image coordinates.
-
-        Parameters:
-            detections (np.ndarray): Normalized detection coordinates.
+        Args:
+            detections: Normalized detection boxes and keypoints
 
         Returns:
-            np.ndarray: Denormalized detection coordinates in original image space.
+            Denormalized detection coordinates
         """
-        detections[:, 0] = (
-            detections[:, 0] * self.scale * self.model_configs["x_scale"] - self.pad[0]
+        # Create a copy to avoid modifying the original array
+        result = detections.copy()
+
+        # Denormalize box coordinates (ymin, xmin, ymax, xmax)
+        result[:, 0] = (
+            result[:, 0] * self.scale * self.model_configs["x_scale"] - self.pad[0]
         )
-        detections[:, 1] = (
-            detections[:, 1] * self.scale * self.model_configs["x_scale"] - self.pad[1]
+        result[:, 1] = (
+            result[:, 1] * self.scale * self.model_configs["x_scale"] - self.pad[1]
         )
-        detections[:, 2] = (
-            detections[:, 2] * self.scale * self.model_configs["x_scale"] - self.pad[0]
+        result[:, 2] = (
+            result[:, 2] * self.scale * self.model_configs["x_scale"] - self.pad[0]
         )
-        detections[:, 3] = (
-            detections[:, 3] * self.scale * self.model_configs["x_scale"] - self.pad[1]
+        result[:, 3] = (
+            result[:, 3] * self.scale * self.model_configs["x_scale"] - self.pad[1]
         )
 
-        detections[:, 4::2] = (
-            detections[:, 4::2] * self.scale * self.model_configs["x_scale"]
-            - self.pad[1]
+        # Denormalize keypoint coordinates (alternating x, y values)
+        result[:, 4::2] = (
+            result[:, 4::2] * self.scale * self.model_configs["x_scale"] - self.pad[1]
         )
-        detections[:, 5::2] = (
-            detections[:, 5::2] * self.scale * self.model_configs["x_scale"]
-            - self.pad[0]
+        result[:, 5::2] = (
+            result[:, 5::2] * self.scale * self.model_configs["x_scale"] - self.pad[0]
         )
 
-        return detections
+        return result
 
     def postprocess_palm_detection(
-        self, outputs: Dict[str, np.ndarray]
-    ) -> List[np.ndarray]:
+        self, outputs: Dict[str, NDArray[np.float32]]
+    ) -> List[NDArray[np.float32]]:
         """
-        Post-processes raw model outputs to generate filtered detections for palm positions.
+        Process model outputs to obtain palm detections.
 
-        Parameters:
-            outputs (dict): A dictionary containing the output tensors from the neural network.
-                            Expected keys are 'palm_detection_full/conv29', 'palm_detection_full/conv34',
-                            'palm_detection_full/conv30', and 'palm_detection_full/conv35'.
+        Args:
+            outputs: Dictionary of model output tensors
 
         Returns:
-            list: A list containing filtered detections after applying weighted non-maximum suppression.
-                If no valid detections are found, returns an empty list.
+            List of detected palms with their bounding boxes, keypoints, and scores
 
         Raises:
-            ValueError: If required output tensors are missing or if there's an error reshaping tensors.
+            ValueError: If required output tensors are missing or if there's an error in reshaping
         """
 
-        def _decode_boxes(raw_boxes: np.ndarray) -> np.ndarray:
+        def _decode_boxes(raw_boxes: NDArray[np.float32]) -> NDArray[np.float32]:
             """
-            Converts the predictions into actual coordinates using the anchor boxes.
+            Decode raw box predictions using anchor boxes.
 
-            Parameters:
-                raw_boxes (np.ndarray): Raw box predictions from the model.
+            Args:
+                raw_boxes: Raw box predictions from the model
 
             Returns:
-                np.ndarray: Decoded box coordinates.
+                Decoded boxes with coordinates in normalized image space
             """
-            boxes = np.zeros(raw_boxes.shape)
+            boxes = np.zeros(raw_boxes.shape, dtype=np.float32)
 
-            # Convert center coordinates using anchor boxes
+            # Decode center coordinates
             x_center = (
                 raw_boxes[..., 0] / self.model_configs["x_scale"] * self.anchors[:, 2]
                 + self.anchors[:, 0]
@@ -400,17 +402,17 @@ class ImagePostprocessorPalmDetection:
                 + self.anchors[:, 1]
             )
 
-            # Convert width and height using anchor boxes
+            # Decode width and height
             w = raw_boxes[..., 2] / self.model_configs["w_scale"] * self.anchors[:, 2]
             h = raw_boxes[..., 3] / self.model_configs["h_scale"] * self.anchors[:, 3]
 
-            # Calculate box coordinates from center and dimensions
-            boxes[..., 0] = y_center - h / 2.0  # ymin
-            boxes[..., 1] = x_center - w / 2.0  # xmin
-            boxes[..., 2] = y_center + h / 2.0  # ymax
-            boxes[..., 3] = x_center + w / 2.0  # xmax
+            # Convert to box coordinates (ymin, xmin, ymax, xmax)
+            boxes[..., 0] = y_center - h / 2.0
+            boxes[..., 1] = x_center - w / 2.0
+            boxes[..., 2] = y_center + h / 2.0
+            boxes[..., 3] = x_center + w / 2.0
 
-            # Convert keypoint coordinates using anchor boxes
+            # Decode keypoint coordinates
             for k in range(self.model_configs["num_keypoints"]):
                 offset = 4 + k * 2
                 keypoint_x = (
@@ -431,36 +433,32 @@ class ImagePostprocessorPalmDetection:
             return boxes
 
         def _tensors_to_detections(
-            raw_box_tensor: np.ndarray, raw_score_tensor: np.ndarray
-        ) -> List[np.ndarray]:
+            raw_box_tensor: NDArray[np.float32], raw_score_tensor: NDArray[np.float32]
+        ) -> List[NDArray[np.float32]]:
             """
-            Converts raw network outputs into proper detections.
+            Convert raw model outputs to detection boxes.
 
-            Parameters:
-                raw_box_tensor (np.ndarray): Raw bounding box tensor from the network.
-                raw_score_tensor (np.ndarray): Raw score tensor from the network.
+            Args:
+                raw_box_tensor: Tensor with box coordinates and keypoints
+                raw_score_tensor: Tensor with detection scores
 
             Returns:
-                list: A list of detection arrays with bounding boxes and scores.
-
-            Reference:
-                mediapipe/calculators/tflite/tflite_tensors_to_detections_calculator.cc
-                mediapipe/calculators/tflite/tflite_tensors_to_detections_calculator.proto
+                List of detection arrays with boxes, keypoints, and scores
             """
-            # Decode boxes from raw outputs
+            # Decode boxes from raw predictions
             detection_boxes = _decode_boxes(raw_box_tensor)
 
-            # Clip and apply sigmoid to scores
+            # Apply sigmoid to scores and filter by threshold
             thresh = self.model_configs["score_clipping_thresh"]
             clipped_score_tensor = np.clip(raw_score_tensor, -thresh, thresh)
             detection_scores = 1 / (1 + np.exp(-clipped_score_tensor))
             detection_scores = np.squeeze(detection_scores, axis=-1)
 
-            # Filter out boxes with low confidence
+            # Filter detections by score threshold
             mask = detection_scores >= self.model_configs["min_score_thresh"]
 
-            # Process each image in the batch
-            output_detections = []
+            # Combine boxes and scores for each batch
+            output_detections: List[NDArray[np.float32]] = []
             for i in range(raw_box_tensor.shape[0]):
                 boxes = detection_boxes[i, mask[i]]
                 scores = detection_scores[i, mask[i]]
@@ -470,7 +468,7 @@ class ImagePostprocessorPalmDetection:
 
             return output_detections
 
-        # Validate inputs
+        # Verify all required output tensors are present
         required_keys = [
             "palm_detection_full/conv29",
             "palm_detection_full/conv34",
@@ -481,85 +479,82 @@ class ImagePostprocessorPalmDetection:
             if key not in outputs:
                 raise ValueError(f"Missing expected output tensor: {key}")
 
-        # Reshape specific convolutional layers to prepare for concatenation
+        # Reshape tensors to expected format
         try:
-            # Score tensors
             conv2D_1 = np.reshape(outputs["palm_detection_full/conv29"], (1, 864, 1))
             conv2D_2 = np.reshape(outputs["palm_detection_full/conv34"], (1, 1152, 1))
-            # Box coordinate tensors
             conv2D_3 = np.reshape(outputs["palm_detection_full/conv30"], (1, 864, 18))
             conv2D_4 = np.reshape(outputs["palm_detection_full/conv35"], (1, 1152, 18))
         except ValueError as e:
             raise ValueError(f"Error reshaping tensors: {e}")
 
-        # Concatenate reshaped tensors along the second axis for scores
-        out1 = np.concatenate((conv2D_2, conv2D_1), axis=1)
+        # Concatenate tensors for scores and boxes
+        out1 = np.concatenate((conv2D_2, conv2D_1), axis=1)  # Scores
+        out2 = np.concatenate((conv2D_4, conv2D_3), axis=1)  # Boxes
 
-        # Concatenate along the second axis for box coordinates
-        out2 = np.concatenate((conv2D_4, conv2D_3), axis=1)
+        # Verify tensor shapes
+        assert out1.shape[0] == 1
+        assert out1.shape[1] == self.model_configs["num_anchors"]
+        assert out1.shape[2] == 1
 
-        # Validate the shapes of concatenated tensors against expected configurations
-        assert out1.shape[0] == 1  # batch size must be 1
-        assert out1.shape[1] == self.model_configs["num_anchors"]  # number of anchors
-        assert out1.shape[2] == 1  # single score per anchor
+        assert out2.shape[0] == 1
+        assert out2.shape[1] == self.model_configs["num_anchors"]
+        assert out2.shape[2] == self.model_configs["num_coords"]
 
-        assert out2.shape[0] == 1  # batch size must be 1
-        assert out2.shape[1] == self.model_configs["num_anchors"]  # number of anchors
-        assert (
-            out2.shape[2] == self.model_configs["num_coords"]
-        )  # coordinates per anchor
-
-        # Convert tensors to detection format using model-specific logic
+        # Convert tensors to detections
         detections = _tensors_to_detections(out2, out1)
 
-        # Apply weighted non-maximum suppression to remove overlapping detections
-        filtered_detections = []
+        # Apply non-maximum suppression
+        filtered_detections: List[List[NDArray[np.float32]]] = []
         for i in range(len(detections)):
             wnms_detections = self._weighted_non_max_suppression(detections[i])
             if len(wnms_detections) > 0:
                 filtered_detections.append(wnms_detections)
 
-        # Normalize final detection list
+        # Extract detections for the first batch (assumes batch size of 1)
         if len(filtered_detections) > 0:
-            normalized_detections = np.array(filtered_detections)[0]
+            normalized_detections = np.array(filtered_detections, dtype=np.float32)[0]
         else:
             normalized_detections = []
 
         return normalized_detections
 
     def draw_detections(
-        self, image: np.ndarray, filtered_detections: np.ndarray
-    ) -> np.ndarray:
+        self, image: NDArray[np.uint8], filtered_detections: NDArray[np.float32]
+    ) -> NDArray[np.uint8]:
         """
-        Draws the filtered detections on an image by marking detected palms and keypoints.
+        Draw palm detection boxes and keypoints on the input image.
 
-        Parameters:
-            image (np.ndarray): The input image on which to draw the detections.
-            filtered_detections (np.ndarray): A list of detection coordinates after non-maximum suppression.
+        Args:
+            image: Input image to draw on
+            filtered_detections: Detected palms with bounding boxes and keypoints
 
         Returns:
-            np.ndarray: The input image with drawn detections.
+            Image with drawn detections
 
         Raises:
-            TypeError: If the input image is not a numpy ndarray.
+            TypeError: If the image is not a numpy array
         """
-
-        # Ensure the input image is a NumPy array
         if not isinstance(image, np.ndarray):
             raise TypeError("Image should be a numpy ndarray")
 
+        # Create a copy of the image to avoid modifying the original
+        result_image = image.copy()
+
         if len(filtered_detections) > 0:
-            # Denormalize detection coordinates to fit the original image scale and padding
+            # Convert normalized coordinates to image coordinates
             detections = self.denormalize_detections(filtered_detections)
 
+            # Draw each detected palm
             for i in range(detections.shape[0]):
+                # Extract bounding box coordinates
                 ymin, xmin, ymax, xmax = detections[i, :4]
 
-                # Draw bounding box around detected palm using OpenCV
+                # Draw bounding box rectangle
                 top_left = (int(xmin), int(ymin))
                 bottom_right = (int(xmax), int(ymax))
                 cv2.rectangle(
-                    image, top_left, bottom_right, color=(0, 0, 255), thickness=4
+                    result_image, top_left, bottom_right, color=(0, 0, 255), thickness=4
                 )
 
                 # Draw keypoints as circles
@@ -569,48 +564,50 @@ class ImagePostprocessorPalmDetection:
                     kp_y = int(detections[i, 4 + k * 2 + 1])
                     radius = 10
 
-                    # Draw keypoints as circles using OpenCV
                     cv2.circle(
-                        image,
+                        result_image,
                         (kp_x, kp_y),
                         radius=radius,
                         color=(0, 0, 255),
                         thickness=2,
                     )
 
-        return image
+        return result_image
 
     def detection2roi(
-        self, detection: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        self, detection: NDArray[np.float32]
+    ) -> Tuple[
+        NDArray[np.float32],
+        NDArray[np.float32],
+        NDArray[np.float32],
+        NDArray[np.float32],
+    ]:
         """
-        Convert detections from detector to an oriented bounding box.
+        Convert palm detection to region of interest (ROI) parameters.
 
-        The center and size of the box is calculated from the center
-        of the detected box. Rotation is calculated from the vector
-        between kp1 and kp2 relative to theta0. The box is scaled
-        and shifted by dscale and dy.
+        This method calculates the center, scale, and rotation angle for the
+        hand ROI based on the palm detection.
 
-        Parameters:
-            detection (np.ndarray): Detection array containing bounding box and keypoints.
+        Args:
+            detection: Palm detection data with bounding box and keypoints
 
         Returns:
-            tuple: (xc, yc, scale, theta) containing center coordinates, scale, and rotation.
-
-        Reference:
-            mediapipe/modules/face_landmark/face_detection_front_detection_to_roi.pbtxt
+            Tuple containing:
+            - xc: x-coordinate of ROI center
+            - yc: y-coordinate of ROI center (with offset)
+            - scale: Scale factor for the ROI
+            - theta: Rotation angle for the ROI
         """
-        # Compute box center and scale
-        # Use mediapipe/calculators/util/detections_to_rects_calculator.cc
+        # Calculate center of the bounding box
         xc = (detection[:, 1] + detection[:, 3]) / 2
         yc = (detection[:, 0] + detection[:, 2]) / 2
-        scale = detection[:, 3] - detection[:, 1]  # assumes square boxes
+        scale = detection[:, 3] - detection[:, 1]  # Width of the bounding box
 
-        # Apply shift and scale adjustments from model config
+        # Apply offset and scaling based on model configuration
         yc += self.model_configs["dy"] * scale
         scale *= self.model_configs["dscale"]
 
-        # Compute box rotation from keypoints
+        # Calculate rotation angle based on keypoints
         x0 = detection[:, 4 + 2 * self.model_configs["kp1"]]
         y0 = detection[:, 4 + 2 * self.model_configs["kp1"] + 1]
         x1 = detection[:, 4 + 2 * self.model_configs["kp2"]]
@@ -620,119 +617,130 @@ class ImagePostprocessorPalmDetection:
         return xc, yc, scale, theta
 
     def extract_roi(
-        self, xc: np.ndarray, yc: np.ndarray, theta: np.ndarray, scale: np.ndarray
-    ) -> np.ndarray:
+        self,
+        xc: NDArray[np.float32],
+        yc: NDArray[np.float32],
+        theta: NDArray[np.float32],
+        scale: NDArray[np.float32],
+    ) -> NDArray[np.float32]:
         """
-        Extracts regions of interest (ROIs) by applying transformations to points.
+        Extract ROI coordinates based on center, scale, and rotation angle.
 
-        Parameters:
-            xc (np.ndarray): Array of x-coordinates for the centers of ROIs.
-            yc (np.ndarray): Array of y-coordinates for the centers of ROIs.
-            theta (np.ndarray): Array of angles in radians for rotation of each ROI.
-            scale (np.ndarray): Array of scaling factors to resize each ROI.
+        Args:
+            xc: x-coordinate of ROI center
+            yc: y-coordinate of ROI center
+            theta: Rotation angle for the ROI
+            scale: Scale factor for the ROI
 
         Returns:
-            np.ndarray: Transformed points representing the corners of each ROI.
-                        Shape is (n, 2, 4) where n is the number of ROIs.
+            Array of coordinates for the ROI corners
         """
-
-        # Reshape scale array for broadcasting during scaling operations
+        # Reshape scale for broadcasting
         scaleN = scale.reshape(-1, 1, 1).astype(np.float32)
 
-        # Define the base square points (corners of a unit square centered at origin)
+        # Define the base rectangle points (4 corners)
         points = np.array([[-1, -1, 1, 1], [-1, 1, -1, 1]], dtype=np.float32)
 
-        # Apply scaling to each point and normalize
+        # Apply scaling
         points = points * scaleN / 2
         points = points.astype(np.float32)
 
-        # Initialize rotation matrices for each ROI
+        # Create rotation matrices for each detection
         R = np.zeros((theta.shape[0], 2, 2), dtype=np.float32)
 
-        # Populate rotation matrices based on theta angles
         for i in range(theta.shape[0]):
             R[i, :, :] = [
                 [np.cos(theta[i]), -np.sin(theta[i])],
                 [np.sin(theta[i]), np.cos(theta[i])],
             ]
 
-        # Stack center coordinates for translation
+        # Combine center coordinates
         center = np.column_stack((xc, yc))
         center = np.expand_dims(center, axis=-1)
 
-        # Apply rotation and translation to points
+        # Apply rotation and translation
         points = np.matmul(R, points) + center
         points = points.astype(np.float32)
 
         return points
 
     def draw_roi(
-        self, image: np.ndarray, filtered_detections: np.ndarray
-    ) -> np.ndarray:
+        self, image: NDArray[np.uint8], filtered_detections: NDArray[np.float32]
+    ) -> NDArray[np.uint8]:
         """
-        Draws regions of interest (ROIs) on a given image.
+        Draw region of interest (ROI) on the input image.
 
-        Parameters:
-            image (np.ndarray): The input image on which to draw ROIs.
-            filtered_detections (np.ndarray): Filtered detection coordinates.
+        Args:
+            image: Input image to draw on
+            filtered_detections: Detected palms with bounding boxes and keypoints
 
         Returns:
-            np.ndarray: The image with ROIs drawn on it.
+            Image with drawn ROI
 
         Raises:
-            TypeError: If the input image is not a numpy ndarray.
+            TypeError: If the image is not a numpy array
         """
-
-        # Ensure the input image is a NumPy array
         if not isinstance(image, np.ndarray):
             raise TypeError("Image should be a numpy ndarray")
 
-        # Convert detections to ROI parameters
+        # Create a copy of the image to avoid modifying the original
+        result_image = image.copy()
+
+        # Convert detection to ROI parameters
         xc, yc, scale, theta = self.detection2roi(filtered_detections)
 
-        # Extract ROI corner points
+        # Extract ROI coordinates
         roi_box = self.extract_roi(xc, yc, theta, scale)
 
-        # Draw ROI quadrilaterals on the image
+        # Draw each ROI as a quadrilateral
         for i in range(roi_box.shape[0]):
-            # Extract the (x, y) coordinates for the current ROI
             (x1, x2, x3, x4), (y1, y2, y3, y4) = roi_box[i]
 
-            # Convert floating point coordinates to integers for drawing
-            pt1_start = (int(x1), int(y1))  # First corner of the quadrilateral
-            pt2_mid_top = (int(x2), int(y2))  # Second corner at mid-top
-            pt2_mid_bottom = (int(x3), int(y3))  # Third corner at mid-bottom
-            pt3_end = (int(x4), int(y4))  # Fourth and final corner
+            # Define the four corners of the ROI
+            pt1_start = (int(x1), int(y1))
+            pt2_mid_top = (int(x2), int(y2))
+            pt2_mid_bottom = (int(x3), int(y3))
+            pt3_end = (int(x4), int(y4))
 
-            # Draw lines using OpenCV to form the quadrilateral
-            cv2.line(image, pt1_start, pt2_mid_top, color=(255, 0, 0), thickness=3)
-            cv2.line(image, pt1_start, pt2_mid_bottom, color=(255, 0, 0), thickness=3)
-            cv2.line(image, pt2_mid_top, pt3_end, color=(255, 0, 0), thickness=3)
-            cv2.line(image, pt2_mid_bottom, pt3_end, color=(255, 0, 0), thickness=3)
+            # Draw the ROI as a blue quadrilateral
+            cv2.line(
+                result_image, pt1_start, pt2_mid_top, color=(255, 0, 0), thickness=3
+            )
+            cv2.line(
+                result_image, pt1_start, pt2_mid_bottom, color=(255, 0, 0), thickness=3
+            )
+            cv2.line(result_image, pt2_mid_top, pt3_end, color=(255, 0, 0), thickness=3)
+            cv2.line(
+                result_image, pt2_mid_bottom, pt3_end, color=(255, 0, 0), thickness=3
+            )
 
-        return image
+        return result_image
 
     def postprocess(
-        self, frame: np.ndarray, outputs: Dict[str, np.ndarray]
-    ) -> np.ndarray:
+        self, frame: NDArray[np.uint8], outputs: Dict[str, NDArray[np.float32]]
+    ) -> NDArray[np.uint8]:
         """
-        Main postprocessing function that processes model outputs and visualizes results.
+        Main post-processing method that handles palm detection and visualization.
 
-        Parameters:
-            frame (np.ndarray): The input image frame.
-            outputs (dict): Model output tensors containing detection results.
+        Args:
+            frame: Input image frame
+            outputs: Dictionary of model output tensors
 
         Returns:
-            np.ndarray: The processed frame with palm detections and ROIs visualized.
+            Processed frame with palm detections and ROIs drawn
         """
-        # Perform palm detection postprocessing
+        # Create a copy of the frame to avoid modifying the original
+        result_frame = frame.copy()
+
+        # Process model outputs to get palm detections
         filtered_detections = self.postprocess_palm_detection(outputs)
 
+        # Draw detections and ROIs if any palms were detected
         if len(filtered_detections) != 0:
-            # Draw palm detections on the frame
-            frame = self.draw_detections(frame, filtered_detections)
+            # Draw bounding boxes and keypoints
+            result_frame = self.draw_detections(result_frame, filtered_detections)
 
-            # Draw regions of interest on the frame
-            frame = self.draw_roi(frame, filtered_detections)
+            # Draw regions of interest
+            result_frame = self.draw_roi(result_frame, filtered_detections)
 
-        return frame
+        return result_frame

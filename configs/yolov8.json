@@ -3,33 +3,6 @@
     "preprocessing": {
       "network_type": "detection",
       "input_shape": [640, 640, 3]
-    },
-    "postprocessing": {
-      "nms_iou_thresh": 0.7,
-      "score_threshold": 0.001,
-      "device_pre_post_layers": {
-        "sigmoid": true
-      },
-      "nms_max_output_per_class": 300,
-      "post_nms_topk": 300,
-      "meta_arch": "nanodet_v8",
-      "anchors": {
-        "strides": [8, 16, 32],
-        "sizes": [
-          [10, 13, 16, 30, 33, 23],
-          [30, 61, 62, 45, 59, 119],
-          [116, 90, 156, 198, 373, 326]
-        ],
-        "scale_factors": [0.5, 0.5],
-        "regression_length": 15,
-        "nms": true
-      },
-      "hpp": true
-    },
-    "evaluation": {
-      "labels_offset": 1,
-      "classes": 80,
-      "dataset_name": "coco_2017_detection"
     }
   },
   {
@@ -115,4 +88,3 @@
     "79": "Toothbrush"
   }
 ]
-

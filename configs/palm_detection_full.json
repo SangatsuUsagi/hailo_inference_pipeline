@@ -1,42 +1,35 @@
 [
-    {
-        "num_layers": 4,
-        "min_scale": 0.1484375,
-        "max_scale": 0.75,
-        "input_size_height": 192,
-        "input_size_width": 192,
-        "anchor_offset_x": 0.5,
-        "anchor_offset_y": 0.5,
-        "strides": [
-            8,
-            16,
-            16,
-            16
-        ],
-        "aspect_ratios": [
-            1.0
-        ],
-        "reduce_boxes_in_lowest_layer": false,
-        "interpolated_scale_aspect_ratio": 1.0,
-        "fixed_anchor_size": true
-    },
-    {
-        "num_classes": 1,
-        "num_anchors": 2016,
-        "num_coords": 18,
-        "score_clipping_thresh": 100.0,
-        "x_scale": 192.0,
-        "y_scale": 192.0,
-        "h_scale": 192.0,
-        "w_scale": 192.0,
-        "min_score_thresh": 0.5,
-        "min_suppression_threshold": 0.3,
-        "num_keypoints": 7,
-        "kp1": 0,
-        "kp2": 2,
-        "theta0": 1.5707963267948966,
-        "dscale": 2.6,
-        "dy": -0.5,
-        "resolution": 256
-    }
+  {
+    "num_layers": 4,
+    "min_scale": 0.1484375,
+    "max_scale": 0.75,
+    "input_size_height": 192,
+    "input_size_width": 192,
+    "anchor_offset_x": 0.5,
+    "anchor_offset_y": 0.5,
+    "strides": [8, 16, 16, 16],
+    "aspect_ratios": [1.0],
+    "reduce_boxes_in_lowest_layer": false,
+    "interpolated_scale_aspect_ratio": 1.0,
+    "fixed_anchor_size": true
+  },
+  {
+    "num_classes": 1,
+    "num_anchors": 2016,
+    "num_coords": 18,
+    "score_clipping_thresh": 100.0,
+    "x_scale": 192.0,
+    "y_scale": 192.0,
+    "h_scale": 192.0,
+    "w_scale": 192.0,
+    "min_score_thresh": 0.5,
+    "min_suppression_threshold": 0.3,
+    "num_keypoints": 7,
+    "kp1": 0,
+    "kp2": 2,
+    "theta0": 1.5707963267948966,
+    "dscale": 2.6,
+    "dy": -0.5,
+    "resolution": 256
+  }
 ]
