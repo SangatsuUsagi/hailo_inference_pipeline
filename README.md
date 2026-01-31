@@ -32,7 +32,6 @@ The pipeline is designed to handle both single images and video streams with rea
 
 ### Performance Features
 
-- **Batch Processing**: Configurable batch sizes for optimal throughput
 - **Zero-Copy Operations**: Efficient buffer management to minimize memory overhead
 - **Pipeline Visualization**: Stacked timing charts and detailed performance breakdowns
 - **Hardware Scheduling**: Configurable scheduling algorithms (Round Robin)
@@ -47,13 +46,12 @@ The pipeline is designed to handle both single images and video streams with rea
 ### Software Dependencies
 
 ```bash
-# Core dependencies
-numpy>=1.19.0
-opencv-python>=4.5.0
-matplotlib>=3.3.0
-
 # Hailo SDK
 hailo-platform>=4.0.0
+
+# Core dependencies
+opencv-python
+matplotlib
 
 # Additional utilities (included in repository)
 - inference_utils (DisplayThread, FrameReaderThread, PerformanceProfiler)
@@ -70,7 +68,9 @@ hailo-platform>=4.0.0
 2. Install Python dependencies:
 
 ```bash
-pip install opencv-python matplotlib
+# It is recommended to use an OpenCV 3.x version that matches the numpy version required by HailoRT.
+# For example:
+pip install opencv-python==3.4.18.65 matplotlib
 ```
 
 3. Ensure the Hailo device is properly connected and recognized:
@@ -210,6 +210,16 @@ Frame 2 → Preprocess → Submit Inference ──────┐     │
 | Implementation Complexity | Simple      | Complex      |
 | Resource Usage            | Lower       | Higher       |
 
+### Example performance measurements
+
+The following table shows measured performance on a 3019-frame video input for different models, comparing asynchronous and synchronous inference modes. (Measured with RaspberryPi5 + Hailo AI-HAT/Hailo-8)
+
+| Model               | Asynchronous FPS | Synchronous FPS | Post-processing time (ms) |
+| ------------------- | ---------------- | --------------- | ------------------------- |
+| Palm_detection_full | 51.66 fps        | 62.02 fps       | 2.72 ms                   |
+| Yolov8n             | 74.33 fps        | 65.96 fps       | 0.560 ms                  |
+| resnet_v1_50        | 72.17 fps        | 68.81 fps       | 0.497 ms                  |
+
 ### Callback Mode (`--callback`)
 
 Available only in asynchronous mode, callback mode processes results immediately upon completion:
@@ -341,7 +351,6 @@ Overall throughput: 24.31 FPS
 **2. "Inference device not ready: timeout"**
 
 - Check Hailo device connection: `hailortcli fw-control identify`
-- Reduce batch size or increase timeout value
 - Ensure no other processes are using the device
 
 **3. "Failed to initialize InferPipeline"**
@@ -415,22 +424,24 @@ Performance Profiling (optional)
 
 This project includes a reference Jupyter notebook that demonstrates:
 
-1. How to build a HEF (Hailo Executable Format) file from a MediaPipe TFLite model
-2. How to test inference with the generated HEF file on the notebook
+- How to build a HEF (Hailo Executable Format) file from a MediaPipe TFLite model
 
-The notebook serves as both a tutorial and a tool to generate HEF files that can be used with the inference Python script in this repository.
 This makes it easier to convert and optimize MediaPipe models for use with Hailo hardware acceleration.
 
 To use the notebook:
 
 1. Open it in Jupyter Lab or Jupyter Notebook
 2. Follow the step-by-step instructions of DFC notebook to convert your TFLite model to HEF format
-3. Run the test inference notebook to verify your model works correctly
-4. Use the generated HEF file with the main inference script
+3. Use the generated HEF file with the main inference script
 
 ## Known issues
 
 Exception handling has not been validated.
+
+## Device-specific limitations
+
+Some Hailo devices do not support synchronous inference API (`--synchronous`), for example, Hailo-10.  
+On such devices, use the default asynchronous inference mode instead.
 
 ## License
 
@@ -447,27 +458,6 @@ This software is licensed under the Apache License 2.0 - see the LICENSE file fo
 
 ---
 
-**Note**: This implementation requires a valid Hailo SDK installation and compatible Hailo hardware. For support, documentation, and model zoo, visit [Hailo Developer Zone](https://hailo.ai/developer-zone/).
-
-## Contributing
-
-Contributions are welcome! Please ensure:
-
-- Code follows PEP 8 style guidelines
-- All exception handling is properly implemented
-- Performance impact is documented
-- Tests are included for new features
-
-## Contact
-
-For issues related to:
-
-- **Hailo SDK**: Contact Hailo support
-- **This implementation**: Open an issue in the repository
-- **Model-specific questions**: Refer to model documentation
-
----
-
-**Version**: 1.1.0  
-**Last Updated**: 2025-10-22  
+**Version**: 1.2.0  
+**Last Updated**: 2026-01-31  
 **Hailo SDK Compatibility**: 4.0+
