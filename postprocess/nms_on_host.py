@@ -1,9 +1,11 @@
-#!/usr/bin/env python3
 """
-Image detection postprocessing module.
+Non-Maximum Suppression (NMS) Post-Processing Module for Object Detection.
 
-This module provides functionality for processing object detection model outputs,
-handling the visualization of bounding boxes and labels on input images.
+This module provides functionality for post-processing object detection model outputs
+on the host device. It handles the visualization of detection results by drawing
+bounding boxes, labels, and confidence scores on images. The module converts
+normalized model output coordinates to image coordinates and applies appropriate
+visual styling for different object classes.
 """
 
 import colorsys
@@ -16,74 +18,72 @@ import numpy as np
 
 class ImagePostprocessorNmsOnHost:
     """
-    A class to handle the postprocessing of object detection outputs.
+    A class for post-processing object detection results and visualizing them on images.
 
-    This class handles detection filtering, coordinate normalization,
-    and visualization of detection results on input images.
+    This class handles the post-processing of object detection model outputs,
+    including drawing bounding boxes, labels, and confidence scores on images.
+    It converts normalized model output coordinates to image coordinates and
+    applies appropriate visual styling for different object classes.
 
     Attributes:
-        scales (tuple): Scaling factors (height, width) used for coordinate normalization.
-        pads (tuple): Padding values (x, y) used during preprocessing.
-        labels (list): List of class labels for detected objects.
-        palette_line (list): RGB color palette for drawing bounding boxes.
-        palette_text (list): Complementary RGB color palette for drawing text.
+        pads (Tuple[float, float]): Padding values for x and y coordinates.
+        scales (Tuple[float, float]): Scaling factors for x and y coordinates.
+        labels (Dict[str, str]): Mapping from class IDs to human-readable labels.
+        palette_line (List[Tuple[int, int, int]]): RGB color palette for bounding boxes.
+        palette_text (List[Tuple[int, int, int]]): RGB color palette for text labels.
     """
 
     def __init__(
         self, params: Tuple[Tuple[float, float], Tuple[float, float]], configs: str
-    ):
+    ) -> None:
         """
-        Initialize the object detection postprocessor with scaling and padding information.
+        Initialize the ImagePostprocessorNmsOnHost with scaling parameters and model configuration.
 
-        Parameters:
-            params (tuple): A tuple containing scaling factors and padding values:
-                           ((x_scale, y_scale), (x_pad, y_pad))
-            configs (str): Path to the JSON configuration file containing model information
-                          and class labels.
-
-        Raises:
-            FileNotFoundError: If the specified configuration file doesn't exist.
-            ValueError: If there's an error decoding the JSON configuration file or if
-                        the input parameters are invalid.
-            TypeError: If the input parameters are not of the expected types.
+        Args:
+            params (Tuple[Tuple[float, float], Tuple[float, float]]): A tuple containing:
+                - scale (Tuple[float, float]): Scaling factors for x and y coordinates.
+                - pads (Tuple[float, float]): Padding values for x and y coordinates.
+            configs (str): Path to the model configuration JSON file.
         """
-        # Validate input parameters
-        if not isinstance(params, tuple) or len(params) != 2:
-            raise TypeError(
-                "params must be a tuple of length 2: ((x_scale, y_scale), (x_pad, y_pad))"
-            )
-        if not isinstance(configs, str):
-            raise TypeError("configs must be a string path to the configuration file")
 
         def generate_palette_and_complement(
             num_classes: int,
         ) -> Tuple[List[Tuple[int, int, int]], List[Tuple[int, int, int]]]:
             """
-            Generate color palettes for visualization.
+            Generate color palettes for visualization of different object classes.
 
-            Creates a set of distinct colors for bounding boxes and their complementary
-            colors for text overlay to ensure readability.
+            Creates two color palettes:
+            1. A primary palette for drawing bounding boxes
+            2. A complementary palette for drawing text with good contrast
 
-            Parameters:
+            Args:
                 num_classes (int): Number of object classes to generate colors for.
 
             Returns:
-                tuple: (rgb_palette, complement_palette) containing RGB color tuples
-                      for lines and text respectively.
+                Tuple[List[Tuple[int, int, int]], List[Tuple[int, int, int]]]:
+                    A tuple containing:
+                    - rgb_palette: List of RGB colors for drawing bounding boxes
+                    - complement_palette: List of complementary RGB colors for text
             """
-            # Generate color for drawing lines
-            hsv_colors = [(i / num_classes, 1.0, 1.0) for i in range(num_classes)]
-            rgb_palette = [
-                tuple(int(c * 255) for c in colorsys.hsv_to_rgb(*hsv))
-                for hsv in hsv_colors
+            # Generate evenly distributed HSV colors for distinct visualization
+            # hsv_colors is a List[Tuple[float, float, float]]
+            hsv_colors: List[Tuple[float, float, float]] = [
+                (i / num_classes, 1.0, 1.0) for i in range(num_classes)
+            ]
+            # Convert HSV colors to RGB for OpenCV compatibility
+            # rgb_palette is a List[Tuple[int, int, int]]
+            rgb_palette: List[Tuple[int, int, int]] = [
+                tuple(int(c * 255) for c in colorsys.hsv_to_rgb(*hsv))  # c is a float
+                for hsv in hsv_colors  # hsv is a Tuple[float, float, float]
             ]
 
-            # Generate complement color for drawing texts over the line color
-            complement_palette = []
+            # Generate complementary colors for better text visibility
+            complement_palette: List[Tuple[int, int, int]] = []
             for r, g, b in rgb_palette:
-                max_val = max(r, g, b)
-                min_val = min(r, g, b)
-                comp = (
+                max_val: int = max(r, g, b)
+                min_val: int = min(r, g, b)
+                # Calculate complementary color using the max+min-value formula
+                comp: Tuple[int, int, int] = (
                     max_val + min_val - r,
                     max_val + min_val - g,
                     max_val + min_val - b,
@@ -92,55 +92,29 @@ class ImagePostprocessorNmsOnHost:
 
             return rgb_palette, complement_palette
 
-        # Read object labels and configuration from JSON file
-        try:
-            with open(configs, "r") as f:
-                model_info = json.load(f)
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                f"Label file not found at path: {configs}. Please provide the correct path."
-            )
-        except json.JSONDecodeError:
-            raise ValueError("Error decoding the label JSON file.")
-        except Exception as e:
-            raise ValueError(f"Unexpected error reading configuration file: {str(e)}")
+        # Load model configuration from JSON file
+        with open(configs, "r") as f:  # f is a TextIO
+            model_info: List = json.load(f)
 
-        # Validate model_info structure
-        if not isinstance(model_info, list) or len(model_info) < 2:
-            raise ValueError("Invalid model configuration format")
+        # Extract model configuration and input shape
+        model_configs: Dict = model_info[0]
+        input_shape: List[int] = model_configs["preprocessing"]["input_shape"][:2]
 
-        try:
-            model_configs = model_info[0]
-            if (
-                not isinstance(model_configs, dict)
-                or "preprocessing" not in model_configs
-            ):
-                raise ValueError("Invalid model configuration format")
-
-            input_shape = model_configs["preprocessing"]["input_shape"][:2]
-
-            # Extract padding values from params
-            self.pads = params[1]
-            if not isinstance(self.pads, tuple) or len(self.pads) != 2:
-                raise ValueError("Invalid padding values: expected tuple of length 2")
-
-            # Calculate scaling factors based on input shape and provided scale
-            scale = params[0]
-            if not isinstance(scale, tuple) or len(scale) != 2:
-                raise ValueError("Invalid scale values: expected tuple of length 2")
-
-            self.scales = (input_shape[0] * scale[0], input_shape[1] * scale[1])
-
-            # Store class labels
-            self.labels = model_info[1]
-            if not isinstance(self.labels, dict):
-                raise ValueError(
-                    "Invalid label format in configuration: expected dictionary mapping class IDs to labels"
-                )
-        except (IndexError, KeyError, TypeError) as e:
-            raise ValueError(f"Invalid configuration structure: {str(e)}")
+        # Store padding values for coordinate denormalization
+        self.pads: Tuple[float, float] = params[1]
+        # Extract scaling factors
+        scale: Tuple[float, float] = params[0]
+        # Calculate final scales by multiplying input shape with scale factors
+        self.scales: Tuple[float, float] = (
+            input_shape[0] * scale[0],
+            input_shape[1] * scale[1],
+        )
+        # Get class labels from model info
+        self.labels: Dict[str, str] = model_info[1]
 
         # Generate color palettes for visualization
+        self.palette_line: List[Tuple[int, int, int]]
+        self.palette_text: List[Tuple[int, int, int]]
         self.palette_line, self.palette_text = generate_palette_and_complement(
             len(self.labels)
         )
@@ -149,46 +123,50 @@ class ImagePostprocessorNmsOnHost:
         self, frame: np.ndarray, detections: Dict[str, List[np.ndarray]]
     ) -> np.ndarray:
         """
-        Draw bounding boxes for detected objects on the input frame.
+        Draw detection bounding boxes, labels, and confidence scores on the frame.
 
-        Parameters:
+        Args:
             frame (np.ndarray): The input image frame to draw on.
-            detections (dict): Detection results from the model.
+            detections (Dict[str, List[np.ndarray]]): Detection results from the model.
 
         Returns:
-            np.ndarray: The frame with drawn bounding boxes.
+            np.ndarray: The frame with detection visualizations drawn on it.
         """
 
         def denormalize_detections(
             detections: Dict[str, List[np.ndarray]],
         ) -> List[List[Union[int, float]]]:
             """
-            Convert normalized detection coordinates to pixel coordinates.
+            Convert normalized detection coordinates to image coordinates.
 
-            Parameters:
-                detections (dict): The normalized detection results.
+            Args:
+                detections (Dict[str, List[np.ndarray]]): Dictionary of detection results.
 
             Returns:
-                list: List of denormalized bounding boxes in the format
-                     [class_id, y1, x1, y2, x2, confidence].
+                List[List[Union[int, float]]]: List of bounding boxes with denormalized coordinates.
+                Each box contains [class_id, y_min, x_min, y_max, x_max, confidence].
             """
-            # Pre-compute transformation arrays for better performance
-            array_factor = np.array([*self.scales, *self.scales], dtype=np.float32)
-            array_offset = np.array([*self.pads, *self.pads], dtype=np.float32)
+            # Create scaling factor array for efficient vectorized computation
+            array_factor: np.ndarray = np.array(
+                [*self.scales, *self.scales], dtype=np.float32
+            )
+            # Create offset array for padding compensation
+            array_offset: np.ndarray = np.array(
+                [*self.pads, *self.pads], dtype=np.float32
+            )
 
-            # Extract outputs from the first (and only) item in detections dictionary
-            try:
-                _, outputs = list(detections.items())[0]
-            except (IndexError, ValueError):
-                return []  # Return empty list if detections is empty or malformed
+            # Extract outputs from the detections dictionary
+            _, outputs = list(detections.items())[0]
 
-            bounding_boxes = []
+            bounding_boxes: List[List[Union[int, float]]] = []
 
             # Process each class's detections
             for class_id, output in enumerate(outputs):
                 for decoded_bbox in output:
-                    # Apply scaling and offset to convert to pixel coordinates
-                    bounding_box = [
+                    # Convert normalized coordinates to image coordinates:
+                    # 1. Multiply by scaling factor to get to original image size
+                    # 2. Subtract padding to compensate for letterboxing
+                    bounding_box: List[Union[int, float]] = [
                         class_id,
                         *(decoded_bbox[:-1] * array_factor - array_offset),
                         decoded_bbox[-1],
@@ -197,20 +175,22 @@ class ImagePostprocessorNmsOnHost:
 
             return bounding_boxes
 
-        # Convert normalized coordinates to pixel coordinates
+        # Convert normalized coordinates to image coordinates
         detections = denormalize_detections(detections)
 
         # Draw each detection on the frame
         for detection in detections:
-            label_id = detection[0]
-            # Confidence score: prob = detection[5] * 100
+            # Extract class ID from detection
+            label_id: int = int(detection[0])
 
             # Extract confidence score
-            confidence = detection[5]
+            confidence: float = float(detection[5])
 
-            # Draw bounding box around detected object using OpenCV
-            top_left = (int(detection[2]), int(detection[1]))
-            bottom_right = (int(detection[4]), int(detection[3]))
+            # Extract bounding box coordinates
+            top_left: Tuple[int, int] = (int(detection[2]), int(detection[1]))
+            bottom_right: Tuple[int, int] = (int(detection[4]), int(detection[3]))
+
+            # Draw bounding box rectangle
             cv2.rectangle(
                 frame,
                 top_left,
@@ -219,40 +199,43 @@ class ImagePostprocessorNmsOnHost:
                 thickness=4,
             )
 
-            # Label display processing with confidence score
-            label = f"{self.labels[str(label_id)]} {confidence:.2f}"
-            font_scale = 0.8
-            text_thickness = 2
+            # Prepare label text with class name and confidence
+            label: str = f"{self.labels[str(label_id)]} {confidence:.2f}"
+            font_scale: float = 0.8
+            text_thickness: int = 2
+
+            # Calculate text size for background rectangle
             (text_width, text_height), baseline = cv2.getTextSize(
                 label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_thickness
             )
 
-            # Calculate coordinates for the label background rectangle inside the bounding box
-            bg_top_left = (top_left[0], top_left[1])
-            bg_bottom_right = (
+            # Create coordinates for text background rectangle
+            bg_top_left: Tuple[int, int] = (top_left[0], top_left[1])
+            bg_bottom_right: Tuple[int, int] = (
                 top_left[0] + text_width,
                 top_left[1] + text_height + baseline,
             )
 
-            # Draw background rectangle (filled)
+            # Draw background rectangle for better text visibility
             cv2.rectangle(
                 frame,
                 bg_top_left,
                 bg_bottom_right,
                 self.palette_line[label_id],
-                -1,  # Fill
+                -1,  # Filled rectangle
             )
 
-            # Draw text
-            text_org = (top_left[0], top_left[1] + text_height)
+            # Calculate text position and draw the label
+            text_org: Tuple[int, int] = (top_left[0], top_left[1] + text_height)
             cv2.putText(
                 frame,
                 label,
                 text_org,
-                # (top_left[0], top_left[1] - baseline),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 font_scale,
-                self.palette_text[label_id],
+                self.palette_text[
+                    label_id
+                ],  # Use complementary color for better visibility
                 text_thickness,
             )
 
@@ -262,27 +245,20 @@ class ImagePostprocessorNmsOnHost:
         self, frame: np.ndarray, outputs: Dict[str, np.ndarray]
     ) -> np.ndarray:
         """
-        Main postprocessing function that processes model outputs and visualizes results.
+        Post-process model outputs and visualize detections on the frame.
 
-        This function applies all necessary postprocessing steps to the raw model outputs
-        and then visualizes the detection results on the input frame.
+        This is the main entry point for post-processing object detection results.
+        It applies visualization if detections are present in the outputs.
 
-        Parameters:
-            frame (np.ndarray): The input image frame.
-            outputs (dict): Model output tensors containing detection results.
+        Args:
+            frame (np.ndarray): The input image frame to process.
+            outputs (Dict[str, np.ndarray]): Model output tensors.
 
         Returns:
-            np.ndarray: The processed frame with object detections visualized.
+            np.ndarray: The processed frame with detections drawn on it.
         """
-        # Validate inputs
-        if frame is None:
-            raise ValueError("Input frame cannot be None")
-
-        if not isinstance(outputs, dict):
-            raise TypeError("outputs must be a dictionary of model outputs")
-
+        # Only draw detections if outputs are not empty
         if len(outputs) != 0:
-            # Draw object detections on the frame when outputs are available
             frame = self.draw_detections(frame, outputs)
 
         return frame

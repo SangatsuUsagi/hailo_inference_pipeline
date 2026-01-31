@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -9,15 +7,11 @@ import numpy as np
 
 class ImagePostprocessorClassification:
     """
-    A class to handle the addition of text overlays to images, based on model outputs.
+    A class for postprocessing classification results from an image inference pipeline.
 
     Attributes:
-        labels (dict): Dictionary containing label mappings loaded from the JSON file.
-        top_n (int): Number of top predictions to display.
-
-    Methods:
-        add_text_to_image(image, strings): Adds text strings to an image at specified positions.
-        postprocess(frame, outputs): Post-processes model outputs and displays top predictions on image.
+        top_n (int): Number of top predictions to consider for each output.
+        labels (Optional[Dict[str, str]]): Mapping of label indices to label names loaded from a JSON file.
     """
 
     def __init__(
@@ -26,7 +20,18 @@ class ImagePostprocessorClassification:
         configs: str,
         top_n: int = 3,
     ):
-        """Initializes the ImagePostprocessor with default values for font, scale, color, thickness, and top_n."""
+        """
+        Initialize the postprocessor with parameters, label configuration, and top_n predictions.
+
+        Args:
+            params (Tuple[Tuple[float, float], Tuple[int, int]]): Unused parameter for initialization.
+            configs (str): Path to the JSON file containing label mappings.
+            top_n (int): Number of top predictions to consider for each output. Defaults to 3.
+
+        Raises:
+            FileNotFoundError: If the label file is not found at the provided path.
+            ValueError: If there is an error decoding the JSON file.
+        """
         self.top_n = top_n
         self.labels: Optional[Dict[str, str]] = None
 
@@ -42,31 +47,24 @@ class ImagePostprocessorClassification:
 
     def add_text_to_image(self, image: np.ndarray, strings: List[str]) -> np.ndarray:
         """
-        Adds a list of text strings to an image at specified positions.
+        Overlay text annotations on the given image.
 
-        Parameters:
-            image (numpy.ndarray): The image as a numpy array.
-            strings (list of str): A list of text strings to be added to the image.
+        Args:
+            image (np.ndarray): The input image on which text will be overlaid.
+            strings (List[str]): List of text strings to display on the image.
 
         Returns:
-            numpy.ndarray: An image object with the text overlay applied.
-
-        Raises:
-            ValueError: If the image cannot be loaded or is invalid.
-
-        This function right-aligns the text block at the top-right corner of the
-        image, maintaining consistent spacing between lines and starting 10 pixels
-        down from the top edge.
+            np.ndarray: The image with text annotations.
         """
-        # Calculate maximum width and height for all text lines
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 1.0
-        color = (0, 0, 255)  # Red color in BGR format
+        color = (0, 0, 255)  # Red color in BGR
         thickness = 2
 
         text_width = 0
         text_height = 0
 
+        # Calculate the maximum text width and height for proper placement.
         for text in strings:
             (w, h), _ = cv2.getTextSize(text, font, font_scale, thickness)
             text_width = max(text_width, w)
@@ -75,6 +73,7 @@ class ImagePostprocessorClassification:
         x_start = image.shape[1] - text_width
         y_start = 10 + text_height // 2
 
+        # Draw each line of text on the image.
         for i, line in enumerate(strings):
             y_position = y_start + i * (text_height + 10)
             cv2.putText(
@@ -93,17 +92,18 @@ class ImagePostprocessorClassification:
         self, frame: np.ndarray, outputs: Dict[str, np.ndarray]
     ) -> np.ndarray:
         """
-        Post-processes model outputs and generates top predictions for each output.
+        Process the inference outputs and annotate the image with the top predictions.
 
-        Parameters:
-            frame (numpy.ndarray): The video frame or image.
-            outputs (dict): A dictionary with keys as output names and values as arrays of prediction probabilities.
+        Args:
+            frame (np.ndarray): The input image to annotate.
+            outputs (Dict[str, np.ndarray]): Dictionary of inference outputs with keys as output names
+                                             and values as arrays of prediction scores.
 
         Returns:
-            numpy.ndarray: The processed frame with text overlay displaying top predictions.
+            np.ndarray: The annotated image.
 
         Raises:
-            ValueError: If a label for an index is not found in the JSON file or if outputs is empty.
+            ValueError: If the outputs dictionary is empty or if a label is not found for an index.
         """
         if not outputs:
             raise ValueError("Empty outputs dictionary provided to postprocess method.")
@@ -123,6 +123,7 @@ class ImagePostprocessorClassification:
                     )
                 display_string.append(f"#{i + 1}: {label} ({index})")
 
+        # Annotate the image with the predictions.
         self.add_text_to_image(frame, display_string)
 
         return frame

@@ -1,27 +1,13 @@
 #!/usr/bin/env python3
 """
 Hailo Inference Pipeline Module
-
-This module provides a comprehensive implementation for deploying deep learning models
-on Hailo hardware accelerators. It supports both synchronous and asynchronous inference
-operations on images and video streams with various post-processing capabilities.
-
-The implementation includes:
-- Model loading and configuration
-- Input preprocessing and formatting
-- Asynchronous and synchronous inference pipelines
-- Result post-processing for classification and detection tasks
-- Support for various output formats and tensor shapes
-
-Usage:
-    python3 inference.py [image files] [options]
 """
 
 import argparse
 import time
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union, Callable, Iterator, TypeVar
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -38,37 +24,112 @@ from hailo_platform import (
     VDevice,
 )
 
+from inference_utils import DisplayThread, FrameReaderThread, PerformanceProfiler
 from postprocess.classification import ImagePostprocessorClassification
 from postprocess.nms_on_host import ImagePostprocessorNmsOnHost
 from postprocess.palm_detection import ImagePostprocessorPalmDetection
 
-# Configuration constants
-TIMEOUT_MS = 10000  # Timeout for asynchronous operations in milliseconds
+TIMEOUT_MS: int = 10000
 
 
-T = TypeVar('T')
+# ============================================================================
+# Exception Classes
+# ============================================================================
+
+
+class InferenceError(Exception):
+    """Base exception for inference-related errors."""
+
+    pass
+
+
+class InferenceSubmitError(InferenceError):
+    """Exception raised when inference submission fails."""
+
+    pass
+
+
+class InferenceTimeoutError(InferenceError):
+    """Exception raised when inference operation times out."""
+
+    pass
+
+
+class InferenceWaitError(InferenceError):
+    """Exception raised when waiting for inference results fails."""
+
+    pass
+
+
+class InferencePipelineError(InferenceError):
+    """Exception raised during synchronous inference pipeline execution."""
+
+    pass
+
+
+# ============================================================================
+# Helper Functions for Exception Detection
+# ============================================================================
+
+
+def is_hailo_timeout_exception(e: Exception) -> bool:
+    """
+    Check if an exception is a Hailo timeout exception.
+
+    Args:
+        e: Exception to check
+
+    Returns:
+        True if exception is HailoRTTimeout
+    """
+    exception_type = type(e).__name__
+    exception_str = str(e).lower()
+    return (
+        exception_type == "HailoRTTimeout"
+        or "timeout" in exception_type.lower()
+        or "timeout" in exception_str
+        or "timed out" in exception_str
+    )
+
+
+def is_hailo_exception(e: Exception) -> bool:
+    """
+    Check if an exception is a Hailo runtime exception.
+
+    Args:
+        e: Exception to check
+
+    Returns:
+        True if exception is HailoRTException or derived type
+    """
+    exception_type = type(e).__name__
+    return (
+        exception_type.startswith("HailoRT")
+        or "hailo" in exception_type.lower()
+        or hasattr(e, "__module__")
+        and "hailo" in str(getattr(e, "__module__", "")).lower()
+    )
+
+
+# ============================================================================
+# InferPipeline Class
+# ============================================================================
+
 
 class InferPipeline:
     """
-    Class to manage asynchronous and blocking inference pipelines for processing input data
-    using deep learning models stored in Hailo Executable Format (HEF).
+    Manages asynchronous and blocking inference pipelines for Hailo models.
 
-    This class provides a flexible interface for loading and running inference on various
-    models with support for both synchronous and asynchronous execution modes. It handles
-    input and output tensor formatting, buffer management, and execution scheduling.
-
-    Attributes:
-        out_results (dict): Dictionary to store output results from asynchronous inference.
-        layer_name_u8 (list): List of layer names that produce uint8 format tensors as outputs.
-        layer_name_u16 (list): List of layer names that produce uint16 format tensors as outputs.
-        configured_infer_model: The configured inference model ready for execution.
-        bindings: Handles input/output data bindings for the model.
-        job: Represents the current asynchronous inference job.
-        is_async (bool): Whether to use asynchronous inference mode.
-        is_callback (bool): Whether to use callbacks for asynchronous inference.
-        is_nms (bool): Whether NMS (Non-Maximum Suppression) is enabled.
-        vdevice: Virtual device instance for hardware acceleration.
+    Supports both synchronous and asynchronous execution modes with various
+    post-processing capabilities for classification and detection tasks.
     """
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
 
     def __init__(
         self,
@@ -81,31 +142,40 @@ class InferPipeline:
         layer_name_u16: List[str],
     ) -> None:
         """
-        Initialize the InferPipeline class with model configuration and execution parameters.
+        Initialize the inference pipeline.
 
         Args:
-            net_path (str): Path to the Hailo Executable Format (HEF) model file.
-            batch_size (int): Number of inputs to process in a single batch.
-            is_async (bool): Whether to use asynchronous inference mode.
-            is_callback (bool): Whether to use callbacks for asynchronous inference results.
-            is_nms (bool): Whether NMS (Non-Maximum Suppression) is enabled in the model.
-            layer_name_u8 (list): Names of layers outputting uint8 formatted tensors.
-            layer_name_u16 (list): Names of layers outputting uint16 formatted tensors.
+            net_path: Path to the HEF model file
+            batch_size: Number of inputs to process in a single batch
+            is_async: Whether to use asynchronous inference mode
+            is_callback: Whether to use callbacks for async inference
+            is_nms: Whether NMS is enabled in the model
+            layer_name_u8: Names of layers outputting uint8 tensors
+            layer_name_u16: Names of layers outputting uint16 tensors
+
+        Raises:
+            RuntimeError: If initialization fails
         """
-        self.out_results = {}  # Store inference results
-        # Layers that output uint8 format tensors
+        # Initialize all attributes first (for safe cleanup)
+        self.out_results: Dict[str, np.ndarray] = {}
         self.layer_name_u8 = layer_name_u8
-        # Layers that output uint16 format tensors
         self.layer_name_u16 = layer_name_u16
 
-        self.configured_infer_model = None
-        self.bindings = None
-        self.job = None
+        self.configured_infer_model: Optional[Any] = None
+        self.bindings: Optional[Any] = None
+        self.job: Optional[Any] = None
         self.is_async = is_async
         self.is_callback = is_callback
         self.is_nms = is_nms
 
-        # Create VDevice and set the parameters for scheduling algorithm
+        # Initialize device-related attributes as None
+        self.vdevice: Optional[VDevice] = None
+        self.infer_model: Optional[Any] = None
+        self.hef: Optional[HEF] = None
+        self.network_group: Optional[Any] = None
+        self.input_vstreams_params: Optional[Any] = None
+        self.output_vstreams_params: Optional[Any] = None
+
         params = VDevice.create_params()
         params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
 
@@ -113,14 +183,10 @@ class InferPipeline:
             self.vdevice = VDevice(params)
 
             if self.is_async:
-                # Load the model onto the device
                 self.infer_model = self.vdevice.create_infer_model(net_path)
-
-                # Set batch size for inference operations on the loaded model
                 self.infer_model.set_batch_size(batch_size)
 
                 for out_name in self.infer_model.output_names:
-                    # Default output type is float32
                     if out_name in self.layer_name_u8:
                         self.infer_model.output(out_name).set_format_type(
                             FormatType.UINT8
@@ -133,11 +199,11 @@ class InferPipeline:
                         self.infer_model.output(out_name).set_format_type(
                             FormatType.FLOAT32
                         )
-            else:
-                # Load the HEF model into device and configure it
-                self.hef = HEF(net_path)
 
-                # Configure network groups
+                self.configured_infer_model = self.infer_model.configure()
+
+            else:
+                self.hef = HEF(net_path)
                 configure_params = ConfigureParams.create_from_hef(
                     hef=self.hef, interface=HailoStreamInterface.PCIe
                 )
@@ -145,7 +211,6 @@ class InferPipeline:
                     self.vdevice.configure(self.hef, configure_params)
                 )[0]
 
-                # Create input and output virtual stream parameters for inference
                 self.input_vstreams_params = InputVStreamParams.make(
                     self.network_group,
                     format_type=FormatType.UINT8,
@@ -154,56 +219,65 @@ class InferPipeline:
                     self.network_group, format_type=FormatType.FLOAT32
                 )
 
-            # Setup the appropriate inference function based on is_async flag
-            if self.is_async:
-                self.inference = lambda dataset: self.infer_async(dataset)
-            else:
-                self.inference = lambda dataset: self.infer_pipeline(dataset)
-
         except Exception as e:
-            print(f"Error during inference: {e}")
+            # Clean up any partially initialized resources
+            try:
+                if self.vdevice is not None:
+                    self.vdevice.release()
+            except Exception:
+                pass  # Ignore cleanup errors
+
+            print(f"Error during initialize: {e}")
+            raise RuntimeError(f"Failed to initialize InferPipeline: {e}") from e
+
+    def inference(self, dataset: List[np.ndarray]) -> Dict[str, np.ndarray]:
+        """
+        Perform inference using configured mode (async or sync).
+
+        Args:
+            dataset: List of input arrays
+
+        Returns:
+            Empty dict for async mode, results for sync mode
+
+        Raises:
+            InferenceError: If inference fails
+        """
+        if self.is_async:
+            self.infer_async(dataset)
+            return {}
+        else:
+            return self.infer_pipeline(dataset)
 
     def close(self) -> None:
-        """
-        Clean up resources used by the inference pipeline.
+        """Clean up allocated resources safely."""
+        try:
+            if self.configured_infer_model is not None:
+                if hasattr(self.configured_infer_model, "release"):
+                    self.configured_infer_model.release()
+                self.configured_infer_model = None
 
-        This method ensures proper cleanup of all allocated resources, including
-        the configured inference model and the virtual device. It should be called
-        when the pipeline is no longer needed to prevent resource leaks.
+            if self.network_group is not None:
+                self.network_group = None
 
-        The method performs the following operations:
-        1. Resets the configured inference model to free associated resources
-        2. Releases the virtual device resources
-
-        This is typically used as part of a teardown process in a try-finally block
-        or when an object is no longer needed.
-        """
-        # Reset the configured inference model to free resources
-        if self.configured_infer_model is not None:
-            self.configured_infer_model = None
-
-        # Release the vdevice resource
-        self.vdevice.release()
+            if self.vdevice is not None:
+                self.vdevice.release()
+                self.vdevice = None
+        except Exception as e:
+            print(f"Warning: Error during cleanup: {e}")
 
     def callback(self, completion_info: Any) -> None:
         """
-        Callback function to handle the completion of asynchronous inference.
-
-        This function is invoked when an asynchronous inference operation completes.
-        It processes the results, handles any exceptions that occurred during inference,
-        and stores the output buffers in the out_results dictionary for later retrieval.
+        Handle completion of asynchronous inference.
 
         Args:
-            completion_info: An object containing information about the completion status,
-                             including exceptions if any occurred during inference, and
-                             access to output buffers with inference results.
+            completion_info: Object containing completion status and results
         """
         if completion_info.exception:
-            # Handle exceptions that occurred during inference
-            print(f"Inference error: {completion_info.exception}")
+            print(f"Inference callback error: {completion_info.exception}")
         else:
+            self.out_results.clear()
             for out_name in self.bindings._output_names:
-                # Store results from each output layer into self.out_results
                 if self.is_nms:
                     self.out_results[out_name] = np.array(
                         self.bindings.output(out_name).get_buffer(), dtype=object
@@ -217,32 +291,37 @@ class InferPipeline:
         """
         Perform asynchronous inference on input data.
 
-        This method configures and starts an asynchronous inference operation on the provided
-        input data. It handles the setup of input and output buffers, configures the model,
-        and initiates the asynchronous inference job. Results can be retrieved later using
-        the wait_and_get_output method.
-
         Args:
-            infer_inputs (list): List of input data arrays for the model.
+            infer_inputs: List of input data arrays for the model
 
-        Returns:
-            None: The method initiates inference but doesn't wait for results. Call
-                  wait_and_get_output() to retrieve the results after completion.
+        Raises:
+            InferenceSubmitError: If inference submission fails
+            InferenceTimeoutError: If waiting for device times out
+            ValueError: If inputs are invalid
         """
-        try:
-            self.configured_infer_model = self.infer_model.configure()
+        # Validate inputs
+        if not infer_inputs:
+            raise ValueError("infer_inputs cannot be empty")
 
-            # Create bindings to manage input/output data buffers
+        if len(infer_inputs) != len(self.infer_model.input_names):
+            raise ValueError(
+                f"Expected {len(self.infer_model.input_names)} inputs, "
+                f"got {len(infer_inputs)}"
+            )
+
+        try:
+            # Create bindings for this inference job
             self.bindings = self.configured_infer_model.create_bindings()
 
-            # Set input buffers using the provided infer inputs
+            # Set input buffers
             for in_name, infer_input in zip(self.infer_model.input_names, infer_inputs):
+                if infer_input is None:
+                    raise ValueError(f"Input '{in_name}' cannot be None")
                 self.bindings.input(in_name).set_buffer(infer_input)
 
-            # Allocate and set output buffers based on expected data format type
+            # Allocate and set output buffers
             for out_name in self.infer_model.output_names:
-                out_buffer = np.array([])
-                # Default output type is float32
+                out_buffer: np.ndarray
                 if out_name in self.layer_name_u8:
                     out_buffer = np.empty(
                         self.infer_model.output(out_name).shape,
@@ -261,160 +340,307 @@ class InferPipeline:
 
                 self.bindings.output(out_name).set_buffer(out_buffer)
 
-            # Set timeout for async inference
-            self.configured_infer_model.wait_for_async_ready(timeout_ms=TIMEOUT_MS)
+            # Wait for async ready with Hailo-specific exception handling
+            try:
+                self.configured_infer_model.wait_for_async_ready(timeout_ms=TIMEOUT_MS)
+            except Exception as e:
+                if is_hailo_timeout_exception(e):
+                    print(f"Timeout waiting for inference device: {e}")
+                    raise InferenceTimeoutError(
+                        f"Inference device not ready: timeout after {TIMEOUT_MS}ms"
+                    ) from e
+                elif is_hailo_exception(e):
+                    print(f"Hailo runtime error while waiting for async ready: {e}")
+                    raise InferenceSubmitError(f"Hailo device error: {e}") from e
+                else:
+                    print(f"Unexpected error waiting for async ready: {e}")
+                    raise InferenceSubmitError(
+                        f"Failed to wait for async ready: {e}"
+                    ) from e
 
-            if self.is_callback:
-                # Start inference and use callback function for handling results
-                self.job = self.configured_infer_model.run_async(
-                    [self.bindings], partial(self.callback)
-                )
-            else:
-                # Start inference without callback
-                self.job = self.configured_infer_model.run_async([self.bindings])
-
-        except Exception as e:
-            print(f"Error during inference: {e}")
-
-        return None
-
-    def wait_and_get_ouput(self) -> Dict[str, np.ndarray]:
-        """
-        Wait for an asynchronous inference job to complete and collect the output results.
-
-        This method blocks until either the inference job completes or the specified timeout
-        is reached. Once completed, it retrieves the inference results from the output buffers
-        and returns them as a dictionary keyed by output layer names.
-
-        Returns:
-            dict: A dictionary mapping output layer names to their corresponding inference results.
-                 Each result is a numpy array with the shape and type specified during configuration.
-
-        Raises:
-            Exception: If an error occurs during waiting or result collection, the exception
-                      is caught and printed to the console, and an empty dictionary is returned.
-        """
-        infer_results = {}
-
-        try:
-            # Wait for inference to complete with the specified timeout
-            self.job.wait(TIMEOUT_MS)
-
-            # Collect the final results after completion
-            for index, out_name in enumerate(self.infer_model.output_names):
+            # Submit async inference job
+            try:
                 if self.is_callback:
-                    # For callback mode, results are already in self.out_results
-                    buffer = (
-                        np.array(self.out_results[out_name], dtype=object)
-                        if self.is_nms
-                        else self.out_results[out_name]
+                    self.job = self.configured_infer_model.run_async(
+                        [self.bindings], partial(self.callback)
                     )
                 else:
-                    # For no-callback mode, manually collect results after waiting
-                    if self.is_nms:
-                        buffer = np.array(
-                            self.bindings.output(
-                                self.infer_model.output_names[index]
-                            ).get_buffer(),
-                            dtype=object,
-                        )
-                    else:
-                        buffer = self.bindings.output(
-                            self.infer_model.output_names[index]
-                        ).get_buffer()
+                    self.job = self.configured_infer_model.run_async([self.bindings])
+            except Exception as e:
+                if is_hailo_exception(e):
+                    print(f"Hailo runtime error during run_async: {e}")
+                    raise InferenceSubmitError(
+                        f"Failed to submit inference job to Hailo device: {e}"
+                    ) from e
+                else:
+                    print(f"Unexpected error during run_async: {e}")
+                    raise InferenceSubmitError(
+                        f"Failed to submit inference job: {e}"
+                    ) from e
 
-                infer_results[out_name] = buffer
+        except (ValueError, InferenceSubmitError, InferenceTimeoutError):
+            raise
+
+        except AttributeError as e:
+            print(f"Initialization error during inference submission: {e}")
+            raise InferenceSubmitError(
+                f"Inference pipeline not properly initialized: {e}"
+            ) from e
 
         except Exception as e:
-            print(f"Error during inference: {e}")
+            print(f"Unexpected error during inference submission: {e}")
+            raise InferenceSubmitError(
+                f"Unexpected error during inference submission: {e}"
+            ) from e
+
+    def wait_and_get_output(self) -> Dict[str, np.ndarray]:
+        """
+        Wait for asynchronous inference completion and retrieve results.
+
+        Returns:
+            Dictionary mapping output layer names to inference results
+
+        Raises:
+            InferenceWaitError: If waiting for results fails
+            InferenceTimeoutError: If waiting times out
+            RuntimeError: If called before submitting an inference job
+        """
+        # Check if there's a job to wait for
+        if self.job is None:
+            raise RuntimeError(
+                "No inference job to wait for. Call infer_async() first."
+            )
+
+        infer_results: Dict[str, np.ndarray] = {}
+
+        try:
+            # Wait for job completion with Hailo-specific timeout handling
+            try:
+                self.job.wait(TIMEOUT_MS)
+            except Exception as e:
+                if is_hailo_timeout_exception(e):
+                    print(f"Inference job timeout: {e}")
+                    raise InferenceTimeoutError(
+                        f"Inference job did not complete within {TIMEOUT_MS}ms"
+                    ) from e
+                elif is_hailo_exception(e):
+                    print(f"Hailo runtime error during job wait: {e}")
+                    raise InferenceWaitError(
+                        f"Hailo device error while waiting for results: {e}"
+                    ) from e
+                else:
+                    print(f"Unexpected error during job wait: {e}")
+                    raise InferenceWaitError(
+                        f"Failed to wait for inference completion: {e}"
+                    ) from e
+
+            # Retrieve results from all output layers
+            for index, out_name in enumerate(self.infer_model.output_names):
+                try:
+                    if self.is_callback:
+                        # Results stored in callback
+                        if out_name not in self.out_results:
+                            raise InferenceWaitError(
+                                f"Output '{out_name}' not found in callback results. "
+                                f"Available outputs: {list(self.out_results.keys())}"
+                            )
+                        buffer = (
+                            np.array(self.out_results[out_name], dtype=object)
+                            if self.is_nms
+                            else self.out_results[out_name]
+                        )
+                    else:
+                        # Results in bindings
+                        try:
+                            if self.is_nms:
+                                buffer = np.array(
+                                    self.bindings.output(
+                                        self.infer_model.output_names[index]
+                                    ).get_buffer(),
+                                    dtype=object,
+                                )
+                            else:
+                                buffer = self.bindings.output(
+                                    self.infer_model.output_names[index]
+                                ).get_buffer()
+                        except Exception as e:
+                            if is_hailo_exception(e):
+                                print(
+                                    f"Hailo error retrieving buffer for '{out_name}': {e}"
+                                )
+                                raise InferenceWaitError(
+                                    f"Failed to retrieve output buffer '{out_name}' from Hailo device: {e}"
+                                ) from e
+                            else:
+                                raise
+
+                    infer_results[out_name] = buffer
+
+                except InferenceWaitError:
+                    raise
+
+                except Exception as e:
+                    print(f"Error retrieving output '{out_name}': {e}")
+                    raise InferenceWaitError(
+                        f"Failed to retrieve output '{out_name}': {e}"
+                    ) from e
+
+        except (InferenceWaitError, InferenceTimeoutError):
+            raise
+
+        except AttributeError as e:
+            print(f"State error while accessing inference results: {e}")
+            raise InferenceWaitError(f"Inference pipeline state is invalid: {e}") from e
+
+        except Exception as e:
+            print(f"Unexpected error while waiting for inference: {e}")
+            raise InferenceWaitError(
+                f"Unexpected error retrieving inference results: {e}"
+            ) from e
 
         return infer_results
 
     def infer_pipeline(self, infer_inputs: List[np.ndarray]) -> Dict[str, np.ndarray]:
         """
-        Perform synchronous (blocking) inference on input data using a network group configuration.
-
-        This method executes inference in a blocking manner, waiting for the results before returning.
-        It configures virtual streams for inputs and outputs, runs the inference, and collects
-        the results immediately.
+        Perform synchronous (blocking) inference on input data.
 
         Args:
-            infer_inputs (list): List of input data arrays for the model.
+            infer_inputs: List of input data arrays for the model
 
         Returns:
-            dict: A dictionary mapping output layer names to their corresponding inference results.
-                 Each result is a numpy array with the shape and type specified during configuration.
+            Dictionary mapping output layer names to inference results
+
+        Raises:
+            InferencePipelineError: If synchronous inference fails
+            InferenceTimeoutError: If operation times out
+            ValueError: If inputs are invalid
         """
-        infer_results = {}
+        # Validate inputs
+        if not infer_inputs:
+            raise ValueError("infer_inputs cannot be empty")
+
+        infer_results: Dict[str, np.ndarray] = {}
 
         try:
-            # Prepare input data by expanding dimensions for each input stream
-            input_data = {}
-            for i, input_vstream_info in enumerate(self.hef.get_input_vstream_infos()):
+            # Prepare input data dictionary
+            input_data: Dict[str, np.ndarray] = {}
+            input_vstream_infos = self.hef.get_input_vstream_infos()
+
+            if len(infer_inputs) != len(input_vstream_infos):
+                raise ValueError(
+                    f"Expected {len(input_vstream_infos)} inputs, "
+                    f"got {len(infer_inputs)}"
+                )
+
+            for i, input_vstream_info in enumerate(input_vstream_infos):
+                if infer_inputs[i] is None:
+                    raise ValueError(f"Input at index {i} cannot be None")
+
+                # Add batch dimension if needed
                 input_data[input_vstream_info.name] = infer_inputs[i][np.newaxis, :]
 
-            # Perform inference on the network group using configured virtual streams
-            with InferVStreams(
-                self.network_group,
-                self.input_vstreams_params,
-                self.output_vstreams_params,
-            ) as infer_pipeline:
-                buffer = infer_pipeline.infer(input_data)
-                for i, output_vstream_info in enumerate(
-                    self.hef.get_output_vstream_infos()
-                ):
-                    if self.is_nms:
-                        infer_results[output_vstream_info.name] = np.array(
-                            buffer[output_vstream_info.name][0], dtype=object
-                        )
-                    else:
-                        # Remove batch dimension for regular outputs
-                        infer_results[output_vstream_info.name] = buffer[
-                            output_vstream_info.name
-                        ].squeeze()
+            # Execute synchronous inference pipeline with Hailo exception handling
+            try:
+                with InferVStreams(
+                    self.network_group,
+                    self.input_vstreams_params,
+                    self.output_vstreams_params,
+                ) as infer_pipeline:
+                    # Run inference
+                    try:
+                        buffer = infer_pipeline.infer(input_data)
+                    except Exception as e:
+                        if is_hailo_timeout_exception(e):
+                            print(f"Inference timeout: {e}")
+                            raise InferenceTimeoutError(
+                                f"Synchronous inference timed out: {e}"
+                            ) from e
+                        elif is_hailo_exception(e):
+                            print(f"Hailo runtime error during inference: {e}")
+                            raise InferencePipelineError(
+                                f"Hailo device error during inference: {e}"
+                            ) from e
+                        else:
+                            raise
+
+                    # Extract results
+                    output_vstream_infos = self.hef.get_output_vstream_infos()
+                    for i, output_vstream_info in enumerate(output_vstream_infos):
+                        output_name = output_vstream_info.name
+
+                        if output_name not in buffer:
+                            available_outputs = list(buffer.keys())
+                            raise InferencePipelineError(
+                                f"Expected output '{output_name}' not found in results. "
+                                f"Available outputs: {available_outputs}"
+                            )
+
+                        try:
+                            if self.is_nms:
+                                infer_results[output_name] = np.array(
+                                    buffer[output_name][0], dtype=object
+                                )
+                            else:
+                                infer_results[output_name] = buffer[
+                                    output_name
+                                ].squeeze()
+                        except Exception as e:
+                            print(f"Error processing output '{output_name}': {e}")
+                            raise InferencePipelineError(
+                                f"Failed to process output '{output_name}': {e}"
+                            ) from e
+
+            except (InferencePipelineError, InferenceTimeoutError):
+                raise
+
+            except Exception as e:
+                if is_hailo_exception(e):
+                    print(f"Hailo error in inference pipeline context: {e}")
+                    raise InferencePipelineError(
+                        f"Hailo device error in inference pipeline: {e}"
+                    ) from e
+                else:
+                    raise
+
+        except (ValueError, InferencePipelineError, InferenceTimeoutError):
+            raise
+
+        except AttributeError as e:
+            print(f"Initialization error during synchronous inference: {e}")
+            raise InferencePipelineError(
+                f"Inference pipeline not properly initialized: {e}"
+            ) from e
+
+        except KeyError as e:
+            print(f"Missing expected data during inference: {e}")
+            raise InferencePipelineError(
+                f"Inference failed due to missing data: {e}"
+            ) from e
 
         except Exception as e:
-            print(f"Error during inference: {e}")
+            print(f"Unexpected error during synchronous inference: {e}")
+            raise InferencePipelineError(
+                f"Unexpected error during inference: {e}"
+            ) from e
 
         return infer_results
+
+
+# ============================================================================
+# Helper Functions (unchanged from original)
+# ============================================================================
 
 
 def format_tensor_info(
     name: str, format: str, order: str, shape: Tuple[int, ...]
 ) -> str:
-    """
-    Generate a formatted string representation of a tensor with its properties.
-
-    This function creates a human-readable string describing a tensor's properties including
-    its name, data format, memory order, and dimensions. The string format varies based on
-    the tensor's shape (1D, 2D, or 3D).
-
-    Args:
-        name: The name of the tensor.
-        format: The data format type (e.g., FLOAT32, UINT8). Only the last segment after
-                the last dot in the string representation is used.
-        order: The memory layout order (e.g., NHWC, NCHW). Only the last segment after
-               the last dot in the string representation is used.
-        shape: The shape dimensions of the tensor. Must be a tuple with 1, 2, or 3 elements.
-
-    Returns:
-        A formatted string describing the tensor's properties.
-
-    Raises:
-        ValueError: If shape is not a tuple with 1, 2, or 3 elements.
-
-    Example:
-        >>> format_tensor_info("input", "FormatType.FLOAT32", "FormatOrder.NHWC", (224, 224, 3))
-        'input FLOAT32, NHWC(224x224x3)'
-    """
+    """Generate formatted string representation of a tensor."""
     if not isinstance(shape, tuple) or len(shape) not in [1, 2, 3]:
         raise ValueError("Shape must be a tuple of length 1, 2 or 3")
 
-    # Extract the last segment of the format and order strings (after the last dot)
     format = str(format).rsplit(".", 1)[1]
     order = str(order).rsplit(".", 1)[1]
 
-    # Format the string differently based on the tensor shape dimensionality
     if len(shape) == 3:
         H, W, C = shape[:3]
         return f"{name} {format}, {order}({H}x{W}x{C})"
@@ -427,109 +653,38 @@ def format_tensor_info(
 
 
 def validate_input_images(images: List[str], vstream_inputs: List[Any]) -> None:
-    """
-    Validate that the number of input images matches the required model inputs.
-
-    This function checks if there are enough input images to satisfy the model's
-    requirements. It compares the length of the provided images list against the
-    number of input streams expected by the model.
-
-    Args:
-        images: A list of input images to be processed by the model.
-        vstream_inputs: A list of input virtual streams required by the model.
-
-    Raises:
-        ValueError: If there are fewer images than required input streams.
-    """
-    # Check if there are fewer images than required by the model
+    """Validate that the number of input images matches model requirements."""
     if len(images) < len(vstream_inputs):
         raise ValueError(
-            f"The number of input images ({len(images)}) must match the required inputs by the model ({len(vstream_inputs)})."
+            f"The number of input images ({len(images)}) must match the required "
+            f"inputs by the model ({len(vstream_inputs)})."
         )
-
-
-def preprocess_image_from_array(
-    image_array: np.ndarray, shape: Union[Tuple[int, int], int]
-) -> Tuple[np.ndarray, Tuple[float, float], Tuple[int, int]]:
-    """
-    Resize images to target dimensions while maintaining aspect ratio.
-
-    This function resizes the input image to match the target dimensions without
-    adding padding. The aspect ratio is preserved by scaling proportionally.
-
-    Args:
-        image_array: The input image as a numpy array.
-        shape: The target dimensions as (height, width) or a single value
-               for both height and width.
-
-    Returns:
-        A tuple containing:
-            - resized_image: The resized image.
-            - scale: Scale factors (scale_x, scale_y) between original and target sizes.
-            - pad: Padding values (0, 0) as this function does not apply padding.
-    """
-    # Determine input dimensions
-    height, width = image_array.shape[:2]
-    target_height, target_width = shape if isinstance(shape, tuple) else (shape, shape)
-
-    # Calculate scale for resizing
-    scale_x = width / target_width
-    scale_y = height / target_height
-
-    # Resize image using OpenCV's resize method with LANCZOS interpolation for high-quality downsampling
-    img_resized = cv2.resize(
-        image_array, (target_width, target_height), interpolation=cv2.INTER_LANCZOS4
-    )
-
-    return img_resized, (scale_x, scale_y), (0, 0)
 
 
 def preprocess_image_from_array_with_pad(
     image_array: np.ndarray, shape: Union[Tuple[int, int], int]
 ) -> Tuple[np.ndarray, Tuple[float, float], Tuple[int, int]]:
-    """
-    Resize and pad images to target dimensions while maintaining aspect ratio.
-
-    This function resizes the input image to fit within the target dimensions while
-    preserving the aspect ratio. It then pads the image with black borders to reach
-    the exact target dimensions.
-
-    Args:
-        image_array: The input image as a numpy array (BGR format).
-        shape: The target dimensions as (height, width) or a single value
-               for both height and width.
-
-    Returns:
-        A tuple containing:
-            - padded_image: The resized and padded image (RGB format).
-            - scale: Scale factors (scale_x, scale_y) between original and target sizes.
-            - pad: Padding values (pad_height, pad_width) applied to the original image.
-    """
-    # Convert OpenCV BGR image to RGB
+    """Resize and pad image to target dimensions while maintaining aspect ratio."""
     image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
 
-    # Determine input dimensions
     height, width = image_array.shape[:2]
     target_height, target_width = shape if isinstance(shape, tuple) else (shape, shape)
 
-    # Calculate resize dimensions and padding based on aspect ratio
-    if height >= width:  # width <= height
+    if height >= width:
         h1 = target_height
         w1 = int((target_height / height) * width)
         padh = 0
         padw = int((target_width - w1) / 2)
         scale = height / h1
-    else:  # height < width
+    else:
         w1 = target_width
         h1 = int((target_width / width) * height)
         padh = int((target_height - h1) / 2)
         padw = 0
         scale = width / w1
 
-    # Resize image using OpenCV's resize method with LANCZOS interpolation for high-quality downsampling
-    img_resized = cv2.resize(image_array, (w1, h1), interpolation=cv2.INTER_LANCZOS4)
+    img_resized = cv2.resize(image_array, (w1, h1), interpolation=cv2.INTER_AREA)
 
-    # Pad the resized image to the target dimensions
     padh1, padh2 = padh, target_height - h1 - padh
     padw1, padw2 = padw, target_width - w1 - padw
 
@@ -537,76 +692,33 @@ def preprocess_image_from_array_with_pad(
         img_resized, padh1, padh2, padw1, padw2, cv2.BORDER_CONSTANT, value=[0, 0, 0]
     )
 
-    # Calculate padding in original scale
     pad = (int(padh * scale), int(padw * scale))
 
     return img_padded, (scale, scale), pad
 
 
-def format_and_print_vstream_info(vstream_infos: List[Any], is_input: bool = True) -> Iterator[Tuple[str, Tuple[int, ...], Any, Any]]:
-    """
-    Format and print information about virtual stream objects.
-
-    This function iterates through a list of virtual stream objects, extracts their
-    properties (name, format, order, shape), formats this information into a readable
-    string, and prints it. It also yields the properties for further processing.
-
-    Args:
-        vstream_infos: A list of virtual stream objects with attributes like
-                      name, format, and shape.
-        is_input: Flag indicating if the streams are inputs (True) or outputs (False).
-                 Default is True.
-
-    Yields:
-        A tuple containing (name, shape, format_type, order) for each virtual stream.
-
-    Example:
-        >>> for name, shape, fmt, order in format_and_print_vstream_info(inputs, is_input=True):
-        ...     print(f"Processing {name} with shape {shape}")
-    """
-    # Iterate over each vstream object with an index
+def format_and_print_vstream_info(
+    vstream_infos: List[Any], is_input: bool = True
+) -> Iterator[Tuple[str, Tuple[int, ...], Any, Any]]:
+    """Format and print virtual stream information."""
     for i, vstream in enumerate(vstream_infos):
         try:
-            # Extract attributes from the vstream object
             name = vstream.name
             fmt_type = vstream.format.type
             order = vstream.format.order
             shape = vstream.shape
 
-            # Format the info string based on whether it's input or output
             info = f"{'Input' if is_input else 'Output'} #{i} {format_tensor_info(name, fmt_type, order, shape)}"
 
-            # Print the formatted information
             print(info)
 
-            # Yield a tuple of name, shape, format, and order type for further processing
             yield name, shape, fmt_type, order
         except AttributeError as e:
             print(f"Error processing vstream #{i}: {e}")
 
 
 def parse_args() -> argparse.Namespace:
-    """
-    Parse command-line arguments for the inference application.
-
-    This function defines and processes command-line arguments that control the behavior
-    of the inference application, including model selection, post-processing type,
-    batch size, and synchronous/asynchronous execution mode.
-
-    Returns:
-        argparse.Namespace: An object containing the parsed command-line arguments.
-
-    Command-line Arguments:
-        images: A list of image file paths to process (positional arguments).
-        -n, --net: Path to the HEF model file (default: "./hefs/resnet_v1_50.hef").
-        -p, --postprocess: Type of post-processing to apply (choices: classification,
-                          palm_detection, nanodet; default: classification).
-        -l, --label: Path to the label definition file in JSON format
-                     (default: "./postprocess/class_names_imagenet.json").
-        --asynchronous: Flag to use asynchronous inference instead of synchronous mode.
-        --callback: Flag to use callbacks with asynchronous inference (requires --asynchronous).
-        -b, --batch-size: Number of images to process in one batch (default: 1).
-    """
+    """Parse command-line arguments for the inference application."""
     parser = argparse.ArgumentParser(description="Python Inference Example")
     parser.add_argument("images", nargs="*", help="Image to infer")
     parser.add_argument(
@@ -626,17 +738,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-c",
         "--config",
-        help="Model definition with JSON format",
+        help="Custom model definition with JSON format",
     )
     parser.add_argument(
-        "--asynchronous",
+        "-s",
+        "--synchronous",
         action="store_true",
-        help="Use asynchronous inference instead of synchronous inference API.",
+        help="Use synchronous inference instead of asynchronous inference API.",
     )
     parser.add_argument(
         "--callback",
         action="store_true",
-        help="Use callback with asynchronous inference, only valid with --asynchronous.",
+        help="Use callback with asynchronous inference, only valid with asynchronous inference.",
     )
     parser.add_argument(
         "-b",
@@ -646,86 +759,70 @@ def parse_args() -> argparse.Namespace:
         required=False,
         help="Number of images in one batch",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable profile in inference loop and show statistics.",
+    )
 
     return parser.parse_args()
 
 
 def main() -> None:
-    """
-    Main function to run the inference pipeline on images or video input.
+    """Main function to run the inference pipeline."""
+    input_shape: List[Tuple[int, int]] = []
+    layer_name_u8: List[str] = []
+    layer_name_u16: List[str] = []
 
-    This function initializes the inference pipeline based on command-line arguments,
-    processes either images or video input, and displays the results. It supports both
-    synchronous and asynchronous inference modes and handles various post-processing
-    options based on the selected model type.
+    profiler = PerformanceProfiler()
 
-    The function performs the following steps:
-    1. Parse command-line arguments
-    2. Load and validate the model
-    3. Initialize the inference pipeline
-    4. Process each frame from the image or video input
-    5. Apply post-processing to the inference results
-    6. Display the results
-    7. Clean up resources
-
-    Performance metrics (execution time and FPS) are calculated and printed at the end.
-    """
-    # Initialize lists to store input shapes and layer names based on output format
-    input_shape = []
-    layer_name_u8 = []  # Layers that output uint8 format tensors
-    layer_name_u16 = []  # Layers that output uint16 format tensors
-
-    # Parse command-line arguments
     args = parse_args()
 
-    is_async = args.asynchronous
-    is_callback = False if not args.asynchronous else args.callback
+    is_async = not args.synchronous
+    is_callback = False if args.synchronous else args.callback
     is_nms = False
 
+    profiling_enabled = args.profile
+
+    # Initialize variables that might be used in finally block
+    infer: Optional[InferPipeline] = None
+    cap: Optional[cv2.VideoCapture] = None
+    display_thread: Optional[DisplayThread] = None
+
     try:
-        # Load the model using the provided network file path
         hef = HEF(args.net)
 
-        # Retrieve input vstream information from the model
         vstream_inputs = hef.get_input_vstream_infos()
 
         if not vstream_inputs:
             raise ValueError("No input streams found in the model.")
 
-        # Validate the provided images against expected input vstreams
         validate_input_images(args.images, vstream_inputs)
 
         print("VStream infos(inputs):")
 
-        # Format and print input information for debugging purposes
         for in_name, in_shape, _, _ in format_and_print_vstream_info(
             vstream_inputs, is_input=True
         ):
             if len(in_shape) < 2:
                 raise ValueError(f"Invalid shape for input {in_name}: {in_shape}")
-            # Store the first two dimensions of each input shape
             input_shape.append(in_shape[:2])
 
-        # Retrieve output vstream information from the model
         vstream_outputs = hef.get_output_vstream_infos()
 
         print("VStream infos(outputs):")
 
-        # Categorize layers based on their output format and store their names
         for out_name, _, out_format, out_order in format_and_print_vstream_info(
             vstream_outputs, is_input=False
         ):
-            # Assume output is only one for HAILO_NMS_BY_CLASS format order
             if out_order == FormatOrder.HAILO_NMS_BY_CLASS:
                 is_nms = True
 
-        # Check input tensor is only one here
         if len(vstream_inputs) != 1:
             raise ValueError(
                 "This program only supports models with a single input tensor. Quitting."
             )
 
-        # Initialize the inference pipeline with model and processing parameters
         infer = InferPipeline(
             args.net,
             args.batch_size,
@@ -741,7 +838,6 @@ def main() -> None:
         if not image_path.exists():
             raise FileNotFoundError(f"File does not exist: {image_path}")
 
-        # Open the video or image file for reading
         cap = cv2.VideoCapture(str(image_path))
 
         if not cap.isOpened():
@@ -753,107 +849,181 @@ def main() -> None:
         frame = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
         _, scale, pad = preprocess_image_from_array_with_pad(frame, input_shape[0])
 
-        # Parameters for post-processing
-        params = (scale, pad)
-        # Configuration for post-processing
-        configs = args.config
+        params: Tuple[Tuple[float, float], Tuple[int, int]] = (scale, pad)
+        configs: Optional[str] = args.config
 
-        # Initialize PostProcess based on the selected post-processing type
+        postprocess: Union[
+            ImagePostprocessorNmsOnHost,
+            ImagePostprocessorPalmDetection,
+            ImagePostprocessorClassification,
+        ]
         if args.postprocess == "nms_on_host":
-            if args.config is None:
-                # Default labels for the classes
+            if configs is None:
                 configs = "./configs/yolov8.json"
             postprocess = ImagePostprocessorNmsOnHost(params, configs)
         elif args.postprocess == "palm_detection":
-            if args.config is None:
-                # Default parameters
+            if configs is None:
                 configs = "./configs/palm_detection_full.json"
             postprocess = ImagePostprocessorPalmDetection(params, configs)
         elif args.postprocess == "classification":
-            if args.config is None:
-                # Default labels for the classes
-                configs = "./postprocess/class_names_imagenet.json"
+            if configs is None:
+                configs = "./configs/class_names_imagenet.json"
             postprocess = ImagePostprocessorClassification(params, configs, top_n=3)
         else:
             raise ValueError(f"Post process {args.postprocess} does not support yet.")
 
-        # Determine if the input is an image or video based on frame count
         is_image = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) <= 1
+
+        # Start display thread for video mode
+        if not is_image:
+            display_thread = DisplayThread(window_name="Output", max_queue_size=2)
+            display_thread.start()
+            print("\nDisplay thread started")
+
         loop = True
-        last_outputs = []
+        last_outputs: Dict[str, np.ndarray] = {}
         frame_count = 0
 
-        start_time = time.time()
+        overall_start_time = time.time()
+
+        print("\nStarting inference loop...")
+        if profiling_enabled:
+            print("Profiling enabled.")
+        print("Press 'q' to quit (video mode only)\n")
+
         while loop:
+            if profiling_enabled:
+                profiler.start_frame()
+
             frame_count += 1
 
             ret, frame = cap.read()
+            if profiling_enabled:
+                profiler.checkpoint("1_frame_read")
 
             if not ret:
-                # End of video or error occurred, exit the loop
                 break
 
-            # Preprocess the frame by resizing and padding it according to input shape
             input_frame, scale, pad = preprocess_image_from_array_with_pad(
                 frame, input_shape[0]
             )
-            inference_dataset = [input_frame]  # Prepare dataset for current frame
+            inference_dataset = [input_frame]
+            if profiling_enabled:
+                profiler.checkpoint("2_preprocessing")
 
             try:
-                # Perform asynchronous or synchronous inference based on the argument
                 outputs = infer.inference(inference_dataset)
+                if profiling_enabled:
+                    profiler.checkpoint("3_inference_submit")
 
-                if is_image and args.asynchronous:
-                    # Get inference results if image file is input, in asynchronous inference
-                    last_outputs = infer.wait_and_get_ouput()
-                elif not args.asynchronous:
-                    # In synchronous inference, just move outputs to last_outputs
+                if is_image and not args.synchronous:
+                    last_outputs = infer.wait_and_get_output()
+                    if profiling_enabled:
+                        profiler.checkpoint("4_inference_wait")
+                elif args.synchronous:
                     last_outputs = outputs
 
-                # Post-process the frame with the inference results
-                # In asynchronous inference, processed last frame results while
-                # inference with current frame on device
                 out_frame = frame
                 if len(last_outputs) != 0:
                     out_frame = postprocess.postprocess(frame, last_outputs)
+                if profiling_enabled:
+                    profiler.checkpoint("5_postprocessing")
 
-                # In asynchronous inference, wait for the inference on the device
-                # and extract the results from the device here
-                if args.asynchronous:
-                    last_outputs = infer.wait_and_get_ouput()
+                if not is_image and not args.synchronous:
+                    last_outputs = infer.wait_and_get_output()
+                    if profiling_enabled:
+                        profiler.checkpoint("6_inference_wait")
 
-            except Exception as e:
-                print(f"Error during inference: {e}")
+            except InferenceTimeoutError as e:
+                print(f"Inference timeout (frame {frame_count}): {e}")
+                continue
+
+            except InferenceSubmitError as e:
+                print(f"Failed to submit inference (frame {frame_count}): {e}")
                 break
 
-            # Display the resulting frame
-            cv2.imshow("Output", out_frame)
+            except InferenceWaitError as e:
+                print(f"Failed to get inference results (frame {frame_count}): {e}")
+                continue
 
+            except InferencePipelineError as e:
+                print(f"Synchronous inference failed (frame {frame_count}): {e}")
+                break
+
+            # Display handling
             if is_image:
-                # For images, wait indefinitely until any key is pressed
+                cv2.imshow("Output", out_frame)
+                if profiling_enabled:
+                    profiler.checkpoint("7_display")
                 loop = False
                 cv2.waitKey(0)
             else:
-                # For videos or streams, check every 1ms for 'q' to quit
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    loop = False
+                if display_thread is not None:
+                    display_thread.display(out_frame)
+                    if profiling_enabled:
+                        profiler.checkpoint("7_display_queue")
 
-    # Ensure resources are released even if an error occurs
+                    if display_thread.is_quit_requested():
+                        loop = False
+
+            if profiling_enabled:
+                profiler.end_frame()
+
+    except InferenceError as e:
+        print(f"Fatal inference error: {e}")
+
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        raise
+
     finally:
-        if "infer" in locals():
-            infer.close()
+        # Stop display thread first (if it was started)
+        if display_thread is not None:
+            print("\nStopping display thread...")
+            display_thread.stop()
 
-        if "cap" in locals():
-            cap.release()
+        # Close inference pipeline
+        if infer is not None:
+            try:
+                infer.close()
+            except Exception as e:
+                print(f"Error closing inference pipeline: {e}")
+
+        # Release video capture
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception as e:
+                print(f"Error releasing video capture: {e}")
+
+        # Destroy all OpenCV windows
+        try:
             cv2.destroyAllWindows()
+        except Exception as e:
+            print(f"Error destroying windows: {e}")
 
-    end_time = time.time()
+    overall_end_time = time.time()
+    overall_elapsed_time = overall_end_time - overall_start_time
 
-    # Calculate and print performance metrics
-    elapsed_time = end_time - start_time
-    print(f"Function took {elapsed_time:.6f} seconds to run.")
-    fps = frame_count / elapsed_time if elapsed_time > 0 else 0
-    print(f"Frame count is {frame_count}, ({fps:.2f} FPS)")
+    print("\n" + "=" * 80)
+    print("BASIC PERFORMANCE SUMMARY")
+    print("=" * 80)
+    print(f"Total execution time: {overall_elapsed_time:.6f} seconds")
+    print(f"Total frames processed: {frame_count}")
+
+    if overall_elapsed_time > 0:
+        overall_fps = frame_count / overall_elapsed_time
+        print(f"Overall throughput: {overall_fps:.2f} FPS")
+
+    print("=" * 80)
+
+    if profiling_enabled:
+        profiler.print_statistics()
+        profiler.draw_stacked_time_chart()
+        profiler.draw_detailed_timing_chart()
 
 
 if __name__ == "__main__":
