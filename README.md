@@ -272,7 +272,12 @@ Average FPS (from frame time): 47.09
 **Visual Charts:**
 
 - **Stacked Time Chart**: Shows cumulative timing for each pipeline stage across frames
+
+![](./images/Pipeline_Stage_Timing_Stacked_Time_Chart.png)
+
 - **Detailed Timing Chart**: Individual timing plots for each stage with mean lines
+
+![](./images/Detailed_Pipeline_Timing_Analysis.png)
 
 ## Exception Handling
 
