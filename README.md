@@ -656,11 +656,11 @@ This software is licensed under the Apache License 2.0 - see the LICENSE file fo
 
 ---
 
-**Version**: 1.3.0  
+**Version**: 1.4.0  
 **Last Updated**: 2026-02-12  
 **Hailo SDK Compatibility**: 4.0+
 
-**What's New in 1.3.0:**
+**What's New in 1.4.0:**
 
 - Multi-thread profiling with Perfetto trace export
 - FrameReaderThread enabled for asynchronous frame capture in video mode
