@@ -1,6 +1,7 @@
 """
 Hailo Inference Pipeline Utility Classes
 """
+
 import queue
 import threading
 import time
@@ -16,7 +17,10 @@ class DisplayThread:
     """Manages asynchronous display of frames in a separate thread."""
 
     def __init__(
-        self, window_name: str = "Output", max_queue_size: int = 2, profiler: Optional['PerformanceProfiler'] = None
+        self,
+        window_name: str = "Output",
+        max_queue_size: int = 2,
+        profiler: Optional["PerformanceProfiler"] = None,
     ) -> None:
         """
         Initialize the display thread.
@@ -34,7 +38,7 @@ class DisplayThread:
         self.thread: Optional[threading.Thread] = None
         self.quit_requested = False
         self.profiler = profiler
-        
+
         # Timing data queue for profiler checkpoints (thread-safe)
         self.timing_queue: queue.Queue[Dict[str, float]] = queue.Queue()
 
@@ -64,16 +68,16 @@ class DisplayThread:
                 key_start = time.time()
                 key = cv2.waitKey(1) & 0xFF
                 key_end = time.time()
-                
+
                 if key == ord("q"):
                     self.quit_requested = True
 
                 # Store timing data for profiler
                 if self.profiler is not None:
                     timing_data = {
-                        'queue_wait': queue_wait_end - queue_wait_start,
-                        'display': display_end - display_start,
-                        'key_check': key_end - key_start,
+                        "queue_wait": queue_wait_end - queue_wait_start,
+                        "display": display_end - display_start,
+                        "key_check": key_end - key_start,
                     }
                     try:
                         self.timing_queue.put_nowait(timing_data)
@@ -107,7 +111,7 @@ class DisplayThread:
     def is_quit_requested(self) -> bool:
         """Check if user requested to quit."""
         return self.quit_requested
-    
+
     def collect_timing_data(self) -> None:
         """
         Collect timing data from display thread and add to profiler.
@@ -115,21 +119,21 @@ class DisplayThread:
         """
         if self.profiler is None:
             return
-        
+
         try:
             timing_data = self.timing_queue.get_nowait()
-            
+
             # Add checkpoints to profiler
             # Note: These are added in the order they occurred in the display thread
             for checkpoint_name, duration in timing_data.items():
                 # Store the duration directly as a list entry
-                self.profiler.checkpoints[f'display_{checkpoint_name}'].append(duration)
-                
+                self.profiler.checkpoints[f"display_{checkpoint_name}"].append(duration)
+
                 # Track order if not already present
-                full_name = f'display_{checkpoint_name}'
+                full_name = f"display_{checkpoint_name}"
                 if full_name not in self.profiler.frame_order:
                     self.profiler.frame_order.append(full_name)
-                    
+
         except queue.Empty:
             pass  # No timing data available
 
@@ -537,7 +541,7 @@ class PerformanceProfiler:
         # Separate main thread and display thread checkpoints
         main_thread_checkpoints = []
         display_thread_checkpoints = []
-        
+
         for name in self.frame_order:
             if name == "total_frame_time":
                 continue
