@@ -298,6 +298,8 @@ Average FPS (from frame time): 47.09
 
 Export profiling data to Perfetto's trace event format for advanced timeline visualization:
 
+![](./images/Perfetto_UI.png)
+
 ```bash
 python inference.py video.mp4 \
     --net ./hefs/resnet_v1_50.hef \
