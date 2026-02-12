@@ -34,6 +34,8 @@ The pipeline is designed to handle both single images and video streams with rea
 
 - **Zero-Copy Operations**: Efficient buffer management to minimize memory overhead
 - **Pipeline Visualization**: Stacked timing charts and detailed performance breakdowns
+- **Multi-Thread Profiling**: Separate thread visualization in Perfetto traces (Main + Display threads)
+- **Perfetto Trace Export**: Industry-standard trace format for advanced performance analysis
 - **Hardware Scheduling**: Configurable scheduling algorithms (Round Robin)
 
 ## Requirements
@@ -204,11 +206,14 @@ Frame → Preprocess → [Inference] → Postprocess → Display
 **Performance:**
 
 ```
-Frame 1 → Preprocess → Submit Inference ────────────┐
-Frame 2 → Preprocess → Submit Inference ──────┐     │
+Frame 1 → Preprocess → Submit Inference
+Frame 2 → Preprocess → Submit Inference ────────────┐
+Frame 3 → Preprocess → Submit Inference ──────┐     │
                                               │     │
-                                    Wait & Postprocess Frame 1
-                                    Wait & Postprocess Frame 2
+                                Postprocess Frame 1 & Wait Frame 2 inference
+                                              │
+                                Postprocess Frame 2 & Wait Frame 3 inference
+
 ```
 
 ### Performance Comparison
@@ -309,6 +314,7 @@ python inference.py video.mp4 \
 Perfetto trace exported to: trace.json
 Total frames: 300
 Total events: 1803
+Threads: Main Thread, Display Thread
 
 Visualize the trace at:
   - Chrome: chrome://tracing
@@ -328,22 +334,77 @@ Visualize the trace at:
    - Click "Open trace file" and select your trace file
    - Explore the interactive timeline with advanced features
 
+**Multi-Thread Visualization:**
+
+The trace shows events across **two separate thread rows**:
+
+**Main Thread (tid: 1)**
+
+- Frame processing pipeline: `frame_read`, `preprocessing`, `inference_submit`, `inference_wait`, `postprocessing`
+- Frame markers showing processing boundaries
+- Queue operations: `display_queue` (sending frames to display thread)
+
+**Display Thread (tid: 2)** (video mode only)
+
+- Asynchronous display operations running in parallel
+- `queue_wait`: Time waiting for frames from main thread
+- `display`: OpenCV rendering time (`cv2.imshow`)
+- `key_check`: Keyboard input polling time
+
+This separation allows you to:
+
+- **See true parallelism**: Visualize when threads run concurrently
+- **Identify bottlenecks**: Determine if main thread or display thread is limiting performance
+- **Analyze queue behavior**: See if display thread is starved or if frames are backing up
+- **Understand pipeline flow**: Complete end-to-end visibility of all operations
+
 **Benefits of Perfetto Trace:**
 
-- **Timeline Visualization**: See exact execution timeline of each pipeline stage
+- **Timeline Visualization**: See exact execution timeline of each pipeline stage across both threads
 - **Frame Boundaries**: Visual markers showing where each frame starts
 - **Duration Events**: Color-coded bars showing how long each stage took
 - **Zoom & Pan**: Interactive exploration of timing data
-- **Performance Analysis**: Identify bottlenecks and timing patterns
+- **Performance Analysis**: Identify bottlenecks and timing patterns across threads
 - **Professional Format**: Industry-standard trace format used by Chrome, Android, and more
+- **Thread Insights**: Understand parallelism, blocking, and synchronization
 
 **What You'll See:**
 
+```
+┌─────────────────────────────────────────────────────┐
+│ Hailo Inference Pipeline                            │
+├─────────────────────────────────────────────────────┤
+│ Main Thread                                         │
+│ ┌─┬────┬────┬───┬────────┬────┬──┐                 │
+│ │●│read│prep│inf│inf_wait│post│q │ Frame 1         │
+│ └─┴────┴────┴───┴────────┴────┴──┘                 │
+│   ┌─┬────┬────┬───┬────────┬────┬──┐               │
+│   │●│read│prep│inf│inf_wait│post│q │ Frame 2       │
+│   └─┴────┴────┴───┴────────┴────┴──┘               │
+├─────────────────────────────────────────────────────┤
+│ Display Thread                                      │
+│   ┌────┬───────┬────┐                               │
+│   │wait│display│ key│ Frame 1                       │
+│   └────┴───────┴────┘                               │
+│        ┌────┬───────┬────┐                          │
+│        │wait│display│ key│ Frame 2                  │
+│        └────┴───────┴────┘                          │
+└─────────────────────────────────────────────────────┘
+```
+
 - Each checkpoint appears as a duration bar on the timeline
 - Frame markers indicate processing boundaries
-- Sequential execution flow is visually clear
+- Sequential execution flow is visually clear across threads
 - Easy to spot timing variations and bottlenecks
 - Metadata includes frame numbers and stage names
+
+**Typical Analysis Use Cases:**
+
+1. **Bottleneck Identification**: See which stage takes longest on which thread
+2. **Parallelism Validation**: Verify display thread runs while main thread processes next frame
+3. **Queue Health**: Check if display thread waits too long (starved) or runs constantly (bottleneck)
+4. **Frame Variance**: Compare timing across frames to spot anomalies
+5. **End-to-End Latency**: Measure complete frame processing time including display
 
 ## Exception Handling
 
@@ -480,16 +541,34 @@ Performance Profiling (optional)
   - Non-blocking video output
   - Queue management with frame dropping
   - User interaction handling
+  - Thread-specific performance profiling (when enabled)
 
 - **`PerformanceProfiler`**: Timing and statistics
-  - Per-stage timing measurement
-  - Statistical analysis
-  - Visualization generation
+  - Per-stage timing measurement across multiple threads
+  - Statistical analysis with variance calculations
+  - Matplotlib visualization (stacked and detailed charts)
+  - Perfetto trace export with multi-thread support
 
 ### Model Attribution
 
 - The palm detection model used in this project is from Google MediaPipe: [MediaPipe Models](https://github.com/google-ai-edge/mediapipe/blob/master/docs/solutions/models.md)
 - The post-processing code for the MediaPipe model is adapted from [blaze_app_python](https://github.com/AlbertaBeef/blaze_app_python/tree/main)
+
+## Additional Documentation
+
+For more detailed information about specific features:
+
+- **[DISPLAY_THREAD_TIMING.md](./DISPLAY_THREAD_TIMING.md)**: Technical details about display thread profiling implementation
+  - Thread-safe timing data collection
+  - How timing data flows from display thread to profiler
+  - Implementation notes and performance impact
+
+- **[PERFETTO_VISUALIZATION_GUIDE.md](./PERFETTO_VISUALIZATION_GUIDE.md)**: Complete guide to using Perfetto traces
+  - Visual examples of multi-thread timeline view
+  - How to interpret the trace data
+  - Common patterns and what they mean
+  - Analysis tips and real-world examples
+  - Interactive features and navigation
 
 ## About Jupyter Notebooks
 
@@ -529,6 +608,13 @@ This software is licensed under the Apache License 2.0 - see the LICENSE file fo
 
 ---
 
-**Version**: 1.2.0  
-**Last Updated**: 2026-01-31  
+**Version**: 1.3.0  
+**Last Updated**: 2026-02-12  
 **Hailo SDK Compatibility**: 4.0+
+
+**What's New in 1.3.0:**
+
+- Multi-thread profiling with Perfetto trace export
+- Display thread timing measurements
+- Separate thread visualization in Perfetto UI
+- Enhanced performance analysis capabilities
