@@ -54,7 +54,7 @@ class DisplayThread:
         while not self.should_stop:
             try:
                 queue_wait_start = time.time()
-                frame = self.frame_queue.get(timeout=0.1)
+                frame = self.frame_queue.get(timeout=1.0)
                 queue_wait_end = time.time()
 
                 if frame is None:
