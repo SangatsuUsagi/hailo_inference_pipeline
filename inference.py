@@ -764,6 +764,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable profile in inference loop and show statistics.",
     )
+    parser.add_argument(
+        "--trace",
+        type=str,
+        metavar="FILE",
+        help="Export profiling data to Perfetto trace JSON file (e.g., trace.json). Requires --profile to be enabled.",
+    )
 
     return parser.parse_args()
 
@@ -777,6 +783,12 @@ def main() -> None:
     profiler = PerformanceProfiler()
 
     args = parse_args()
+
+    # Validate that --trace requires --profile
+    if args.trace and not args.profile:
+        print("Error: --trace requires --profile to be enabled")
+        print("Usage: Add --profile flag when using --trace")
+        return
 
     is_async = not args.synchronous
     is_callback = False if args.synchronous else args.callback
@@ -1022,6 +1034,11 @@ def main() -> None:
 
     if profiling_enabled:
         profiler.print_statistics()
+        
+        # Export Perfetto trace if requested
+        if args.trace:
+            profiler.export_perfetto_trace(args.trace)
+        
         profiler.draw_stacked_time_chart()
         profiler.draw_detailed_timing_chart()
 

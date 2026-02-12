@@ -460,3 +460,130 @@ class PerformanceProfiler:
         print("\nDisplaying detailed timing charts...")
         print("Close the chart window to continue.")
         plt.show()
+
+    def export_perfetto_trace(self, output_path: str = "trace.json") -> None:
+        """
+        Export profiling data to Perfetto/Chrome trace event format.
+
+        The output JSON can be visualized in:
+        - Chrome: chrome://tracing
+        - Perfetto UI: https://ui.perfetto.dev
+
+        Args:
+            output_path: Path to save the JSON trace file
+        """
+        import json
+
+        if not self.checkpoints:
+            print("No profiling data to export.")
+            return
+
+        trace_events = []
+        process_id = 1
+        thread_id = 1
+
+        # Exclude 'total_frame_time' from individual events
+        checkpoint_names = [
+            name for name in self.frame_order if name != "total_frame_time"
+        ]
+
+        if not checkpoint_names:
+            print("No checkpoint data to export.")
+            return
+
+        # Determine the number of frames
+        num_frames = len(self.checkpoints[checkpoint_names[0]])
+
+        # Base timestamp in microseconds (arbitrary start time)
+        base_timestamp_us = 0
+
+        # Track cumulative time for each frame
+        frame_timestamps = []
+        current_time_us = base_timestamp_us
+
+        # Build frame start timestamps
+        for frame_idx in range(num_frames):
+            frame_timestamps.append(current_time_us)
+
+            # Calculate frame duration
+            frame_duration_us = 0
+            for checkpoint_name in checkpoint_names:
+                if frame_idx < len(self.checkpoints[checkpoint_name]):
+                    checkpoint_time_s = self.checkpoints[checkpoint_name][frame_idx]
+                    frame_duration_us += int(checkpoint_time_s * 1_000_000)
+
+            current_time_us += frame_duration_us
+
+        # Generate trace events for each frame and checkpoint
+        for frame_idx in range(num_frames):
+            frame_start_us = frame_timestamps[frame_idx]
+            checkpoint_start_us = frame_start_us
+
+            # Add frame boundary event (instant marker)
+            trace_events.append(
+                {
+                    "name": f"Frame {frame_idx + 1}",
+                    "cat": "frame",
+                    "ph": "i",  # Instant event
+                    "ts": frame_start_us,
+                    "pid": process_id,
+                    "tid": thread_id,
+                    "s": "g",  # Global scope
+                }
+            )
+
+            # Add duration events for each checkpoint
+            for checkpoint_name in checkpoint_names:
+                if frame_idx < len(self.checkpoints[checkpoint_name]):
+                    duration_s = self.checkpoints[checkpoint_name][frame_idx]
+                    duration_us = int(duration_s * 1_000_000)
+
+                    # Duration event (Begin/End pair)
+                    trace_events.append(
+                        {
+                            "name": checkpoint_name,
+                            "cat": "pipeline",
+                            "ph": "X",  # Complete event (duration)
+                            "ts": checkpoint_start_us,
+                            "dur": duration_us,
+                            "pid": process_id,
+                            "tid": thread_id,
+                            "args": {"frame": frame_idx + 1},
+                        }
+                    )
+
+                    checkpoint_start_us += duration_us
+
+        # Add metadata
+        trace_events.append(
+            {
+                "name": "process_name",
+                "ph": "M",
+                "pid": process_id,
+                "args": {"name": "Hailo Inference Pipeline"},
+            }
+        )
+
+        trace_events.append(
+            {
+                "name": "thread_name",
+                "ph": "M",
+                "pid": process_id,
+                "tid": thread_id,
+                "args": {"name": "Main Thread"},
+            }
+        )
+
+        # Create the trace file structure
+        trace_data = {"traceEvents": trace_events, "displayTimeUnit": "ms"}
+
+        # Write to file
+        with open(output_path, "w") as f:
+            json.dump(trace_data, f, indent=2)
+
+        print(f"\nPerfetto trace exported to: {output_path}")
+        print(f"Total frames: {num_frames}")
+        print(f"Total events: {len(trace_events)}")
+        print("\nVisualize the trace at:")
+        print("  - Chrome: chrome://tracing")
+        print("  - Perfetto UI: https://ui.perfetto.dev")

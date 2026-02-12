@@ -109,6 +109,16 @@ python inference.py video.mp4 \
     --profile
 ```
 
+#### Performance Profiling with Perfetto Trace Export
+
+```bash
+python inference.py video.mp4 \
+    --net ./hefs/resnet_v1_50.hef \
+    --postprocess classification \
+    --profile \
+    --trace trace.json
+```
+
 #### Synchronous Inference
 
 ```bash
@@ -120,16 +130,17 @@ python inference.py image.jpg \
 
 ### Command Line Arguments
 
-| Argument        | Short | Type       | Default                   | Description                                                             |
-| --------------- | ----- | ---------- | ------------------------- | ----------------------------------------------------------------------- |
-| `images`        | -     | positional | required                  | Path to image or video file to process                                  |
-| `--net`         | `-n`  | string     | `./hefs/resnet_v1_50.hef` | Path to HEF model file                                                  |
-| `--postprocess` | `-p`  | choice     | `classification`          | Post-processing type: `classification`, `nms_on_host`, `palm_detection` |
-| `--config`      | `-c`  | string     | auto-detected             | Path to custom JSON configuration file for post-processing              |
-| `--synchronous` | `-s`  | flag       | false                     | Use synchronous inference on HRT 4.X (default: asynchronous)            |
-| `--callback`    | -     | flag       | false                     | Use callback mode with async inference                                  |
-| `--batch-size`  | `-b`  | integer    | 1                         | Number of images per batch                                              |
-| `--profile`     | -     | flag       | false                     | Enable performance profiling with visualization                         |
+| Argument        | Short | Type       | Default                   | Description                                                              |
+| --------------- | ----- | ---------- | ------------------------- | ------------------------------------------------------------------------ |
+| `images`        | -     | positional | required                  | Path to image or video file to process                                   |
+| `--net`         | `-n`  | string     | `./hefs/resnet_v1_50.hef` | Path to HEF model file                                                   |
+| `--postprocess` | `-p`  | choice     | `classification`          | Post-processing type: `classification`, `nms_on_host`, `palm_detection`  |
+| `--config`      | `-c`  | string     | auto-detected             | Path to custom JSON configuration file for post-processing               |
+| `--synchronous` | `-s`  | flag       | false                     | Use synchronous inference on HRT 4.X (default: asynchronous)             |
+| `--callback`    | -     | flag       | false                     | Use callback mode with async inference                                   |
+| `--batch-size`  | `-b`  | integer    | 1                         | Number of images per batch                                               |
+| `--profile`     | -     | flag       | false                     | Enable performance profiling with visualization                          |
+| `--trace`       | -     | string     | none                      | Export profiling data to Perfetto trace JSON file (requires `--profile`) |
 
 ### Configuration Files
 
@@ -278,6 +289,61 @@ Average FPS (from frame time): 47.09
 - **Detailed Timing Chart**: Individual timing plots for each stage with mean lines
 
 ![](./images/Detailed_Pipeline_Timing_Analysis.png)
+
+### Perfetto Trace Export
+
+Export profiling data to Perfetto's trace event format for advanced timeline visualization:
+
+![](./images/Perfetto_UI.png)
+
+```bash
+python inference.py video.mp4 \
+    --net ./hefs/resnet_v1_50.hef \
+    --profile \
+    --trace trace.json
+```
+
+**Output:**
+
+```
+Perfetto trace exported to: trace.json
+Total frames: 300
+Total events: 1803
+
+Visualize the trace at:
+  - Chrome: chrome://tracing
+  - Perfetto UI: https://ui.perfetto.dev
+```
+
+**Viewing the Trace:**
+
+1. **Chrome Tracing Tool**:
+   - Open Chrome browser
+   - Navigate to `chrome://tracing`
+   - Click "Load" and select your trace file
+   - Use WASD keys to navigate the timeline
+
+2. **Perfetto UI** (recommended):
+   - Visit https://ui.perfetto.dev
+   - Click "Open trace file" and select your trace file
+   - Explore the interactive timeline with advanced features
+
+**Benefits of Perfetto Trace:**
+
+- **Timeline Visualization**: See exact execution timeline of each pipeline stage
+- **Frame Boundaries**: Visual markers showing where each frame starts
+- **Duration Events**: Color-coded bars showing how long each stage took
+- **Zoom & Pan**: Interactive exploration of timing data
+- **Performance Analysis**: Identify bottlenecks and timing patterns
+- **Professional Format**: Industry-standard trace format used by Chrome, Android, and more
+
+**What You'll See:**
+
+- Each checkpoint appears as a duration bar on the timeline
+- Frame markers indicate processing boundaries
+- Sequential execution flow is visually clear
+- Easy to spot timing variations and bottlenecks
+- Metadata includes frame numbers and stage names
 
 ## Exception Handling
 
