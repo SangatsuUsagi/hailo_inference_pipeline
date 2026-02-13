@@ -1,6 +1,7 @@
 """
 Hailo Inference Pipeline Utility Classes
 """
+
 import queue
 import threading
 import time
@@ -16,7 +17,10 @@ class DisplayThread:
     """Manages asynchronous display of frames in a separate thread."""
 
     def __init__(
-        self, window_name: str = "Output", max_queue_size: int = 2, profiler: Optional['PerformanceProfiler'] = None
+        self,
+        window_name: str = "Output",
+        max_queue_size: int = 2,
+        profiler: Optional["PerformanceProfiler"] = None,
     ) -> None:
         """
         Initialize the display thread.
@@ -34,7 +38,7 @@ class DisplayThread:
         self.thread: Optional[threading.Thread] = None
         self.quit_requested = False
         self.profiler = profiler
-        
+
         # Timing data queue for profiler checkpoints (thread-safe)
         self.timing_queue: queue.Queue[Dict[str, float]] = queue.Queue()
 
@@ -50,7 +54,7 @@ class DisplayThread:
         while not self.should_stop:
             try:
                 queue_wait_start = time.time()
-                frame = self.frame_queue.get(timeout=0.1)
+                frame = self.frame_queue.get(timeout=1.0)
                 queue_wait_end = time.time()
 
                 if frame is None:
@@ -64,16 +68,16 @@ class DisplayThread:
                 key_start = time.time()
                 key = cv2.waitKey(1) & 0xFF
                 key_end = time.time()
-                
+
                 if key == ord("q"):
                     self.quit_requested = True
 
                 # Store timing data for profiler
                 if self.profiler is not None:
                     timing_data = {
-                        'queue_wait': queue_wait_end - queue_wait_start,
-                        'display': display_end - display_start,
-                        'key_check': key_end - key_start,
+                        "queue_wait": queue_wait_end - queue_wait_start,
+                        "display": display_end - display_start,
+                        "key_check": key_end - key_start,
                     }
                     try:
                         self.timing_queue.put_nowait(timing_data)
@@ -107,7 +111,7 @@ class DisplayThread:
     def is_quit_requested(self) -> bool:
         """Check if user requested to quit."""
         return self.quit_requested
-    
+
     def collect_timing_data(self) -> None:
         """
         Collect timing data from display thread and add to profiler.
@@ -115,21 +119,21 @@ class DisplayThread:
         """
         if self.profiler is None:
             return
-        
+
         try:
             timing_data = self.timing_queue.get_nowait()
-            
+
             # Add checkpoints to profiler
             # Note: These are added in the order they occurred in the display thread
             for checkpoint_name, duration in timing_data.items():
                 # Store the duration directly as a list entry
-                self.profiler.checkpoints[f'display_{checkpoint_name}'].append(duration)
-                
+                self.profiler.checkpoints[f"display_{checkpoint_name}"].append(duration)
+
                 # Track order if not already present
-                full_name = f'display_{checkpoint_name}'
+                full_name = f"display_{checkpoint_name}"
                 if full_name not in self.profiler.frame_order:
                     self.profiler.frame_order.append(full_name)
-                    
+
         except queue.Empty:
             pass  # No timing data available
 
@@ -153,13 +157,19 @@ class DisplayThread:
 class FrameReaderThread:
     """Asynchronously reads frames from video source in a separate thread."""
 
-    def __init__(self, video_source: cv2.VideoCapture, max_queue_size: int = 4) -> None:
+    def __init__(
+        self,
+        video_source: cv2.VideoCapture,
+        max_queue_size: int = 4,
+        profiler: Optional["PerformanceProfiler"] = None,
+    ) -> None:
         """
         Initialize the frame reader thread.
 
         Args:
             video_source: OpenCV VideoCapture object
             max_queue_size: Maximum number of frames to buffer
+            profiler: Optional PerformanceProfiler instance for timing measurements
         """
         self.video_source = video_source
         self.frame_queue: queue.Queue[Optional[np.ndarray]] = queue.Queue(
@@ -168,6 +178,10 @@ class FrameReaderThread:
         self.should_stop = False
         self.thread: Optional[threading.Thread] = None
         self.read_error = False
+        self.profiler = profiler
+
+        # Timing data queue for profiler checkpoints (thread-safe)
+        self.timing_queue: queue.Queue[Dict[str, float]] = queue.Queue()
 
     def start(self) -> None:
         """Start the frame reading thread."""
@@ -179,7 +193,9 @@ class FrameReaderThread:
     def _read_loop(self) -> None:
         """Main loop for reading frames."""
         while not self.should_stop:
+            read_start = time.time()
             ret, frame = self.video_source.read()
+            read_end = time.time()
 
             if not ret:
                 # Signal end of video
@@ -192,7 +208,21 @@ class FrameReaderThread:
 
             try:
                 # Block if queue is full (backpressure mechanism)
+                queue_wait_start = time.time()
                 self.frame_queue.put(frame, timeout=1.0)
+                queue_wait_end = time.time()
+
+                # Store timing data for profiler
+                if self.profiler is not None:
+                    timing_data = {
+                        "read": read_end - read_start,
+                        "queue_put": queue_wait_end - queue_wait_start,
+                    }
+                    try:
+                        self.timing_queue.put_nowait(timing_data)
+                    except queue.Full:
+                        pass  # Drop timing data if queue is full
+
             except queue.Full:
                 # Drop frame if queue is consistently full
                 continue
@@ -215,6 +245,31 @@ class FrameReaderThread:
     def has_error(self) -> bool:
         """Check if a read error occurred."""
         return self.read_error
+
+    def collect_timing_data(self) -> None:
+        """
+        Collect timing data from frame reader thread and add to profiler.
+        Should be called from main thread after getting a frame.
+        """
+        if self.profiler is None:
+            return
+
+        try:
+            timing_data = self.timing_queue.get_nowait()
+
+            # Add checkpoints to profiler
+            # Note: These are added in the order they occurred in the reader thread
+            for checkpoint_name, duration in timing_data.items():
+                # Store the duration directly as a list entry
+                self.profiler.checkpoints[f"capture_{checkpoint_name}"].append(duration)
+
+                # Track order if not already present
+                full_name = f"capture_{checkpoint_name}"
+                if full_name not in self.profiler.frame_order:
+                    self.profiler.frame_order.append(full_name)
+
+        except queue.Empty:
+            pass  # No timing data available
 
     def stop(self) -> None:
         """Stop the frame reading thread."""
@@ -533,25 +588,37 @@ class PerformanceProfiler:
         process_id = 1
         main_thread_id = 1
         display_thread_id = 2
+        capture_thread_id = 3
 
-        # Separate main thread and display thread checkpoints
+        # Separate main thread, display thread, and capture thread checkpoints
         main_thread_checkpoints = []
         display_thread_checkpoints = []
-        
+        capture_thread_checkpoints = []
+
         for name in self.frame_order:
             if name == "total_frame_time":
                 continue
             if name.startswith("display_"):
                 display_thread_checkpoints.append(name)
+            elif name.startswith("capture_"):
+                capture_thread_checkpoints.append(name)
             else:
                 main_thread_checkpoints.append(name)
 
-        if not main_thread_checkpoints and not display_thread_checkpoints:
+        if (
+            not main_thread_checkpoints
+            and not display_thread_checkpoints
+            and not capture_thread_checkpoints
+        ):
             print("No checkpoint data to export.")
             return
 
         # Determine the number of frames
-        all_checkpoints = main_thread_checkpoints + display_thread_checkpoints
+        all_checkpoints = (
+            main_thread_checkpoints
+            + display_thread_checkpoints
+            + capture_thread_checkpoints
+        )
         num_frames = len(self.checkpoints[all_checkpoints[0]]) if all_checkpoints else 0
 
         # Base timestamp in microseconds (arbitrary start time)
@@ -613,6 +680,33 @@ class PerformanceProfiler:
 
                     checkpoint_start_us += duration_us
 
+            # Add capture thread events (if any)
+            # Capture thread events start at the same time as the frame
+            # but on a different thread ID
+            capture_start_us = frame_start_us
+            for checkpoint_name in capture_thread_checkpoints:
+                if frame_idx < len(self.checkpoints[checkpoint_name]):
+                    duration_s = self.checkpoints[checkpoint_name][frame_idx]
+                    duration_us = int(duration_s * 1_000_000)
+
+                    # Remove "capture_" prefix for cleaner display
+                    capture_name = checkpoint_name.replace("capture_", "")
+
+                    trace_events.append(
+                        {
+                            "name": capture_name,
+                            "cat": "capture",
+                            "ph": "X",  # Complete event (duration)
+                            "ts": capture_start_us,
+                            "dur": duration_us,
+                            "pid": process_id,
+                            "tid": capture_thread_id,
+                            "args": {"frame": frame_idx + 1},
+                        }
+                    )
+
+                    capture_start_us += duration_us
+
             # Add display thread events (if any)
             # Display thread events start at the same time as the frame
             # but on a different thread ID
@@ -660,6 +754,18 @@ class PerformanceProfiler:
             }
         )
 
+        # Add capture thread metadata if there are capture events
+        if capture_thread_checkpoints:
+            trace_events.append(
+                {
+                    "name": "thread_name",
+                    "ph": "M",
+                    "pid": process_id,
+                    "tid": capture_thread_id,
+                    "args": {"name": "Capture Thread"},
+                }
+            )
+
         # Add display thread metadata if there are display events
         if display_thread_checkpoints:
             trace_events.append(
@@ -679,11 +785,18 @@ class PerformanceProfiler:
         with open(output_path, "w") as f:
             json.dump(trace_data, f, indent=2)
 
+        # Build thread list for output
+        thread_list = ["Main Thread"]
+        if capture_thread_checkpoints:
+            thread_list.append("Capture Thread")
+        if display_thread_checkpoints:
+            thread_list.append("Display Thread")
+
         print(f"\nPerfetto trace exported to: {output_path}")
         print(f"Total frames: {num_frames}")
         print(f"Total events: {len(trace_events)}")
-        if display_thread_checkpoints:
-            print(f"Threads: Main Thread, Display Thread")
+        if len(thread_list) > 1:
+            print(f"Threads: {', '.join(thread_list)}")
         print("\nVisualize the trace at:")
         print("  - Chrome: chrome://tracing")
         print("  - Perfetto UI: https://ui.perfetto.dev")

@@ -800,6 +800,7 @@ def main() -> None:
     infer: Optional[InferPipeline] = None
     cap: Optional[cv2.VideoCapture] = None
     display_thread: Optional[DisplayThread] = None
+    frame_reader_thread: Optional[FrameReaderThread] = None
 
     try:
         hef = HEF(args.net)
@@ -886,11 +887,25 @@ def main() -> None:
 
         is_image = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) <= 1
 
+        # Start frame reader thread for video mode
+        if not is_image:
+            frame_reader_thread = FrameReaderThread(
+                video_source=cap,
+                max_queue_size=4,
+                profiler=profiler if profiling_enabled else None,
+            )
+            frame_reader_thread.start()
+            print("Frame reader thread started")
+
         # Start display thread for video mode
         if not is_image:
-            display_thread = DisplayThread(window_name="Output", max_queue_size=2)
+            display_thread = DisplayThread(
+                window_name="Output",
+                max_queue_size=2,
+                profiler=profiler if profiling_enabled else None,
+            )
             display_thread.start()
-            print("\nDisplay thread started")
+            print("Display thread started")
 
         loop = True
         last_outputs: Dict[str, np.ndarray] = {}
@@ -901,7 +916,7 @@ def main() -> None:
         print("\nStarting inference loop...")
         if profiling_enabled:
             print("Profiling enabled.")
-        print("Press 'q' to quit (video mode only)\n")
+        print("Press 'q' to quit\n")
 
         while loop:
             if profiling_enabled:
@@ -909,9 +924,28 @@ def main() -> None:
 
             frame_count += 1
 
-            ret, frame = cap.read()
-            if profiling_enabled:
-                profiler.checkpoint("1_frame_read")
+            # Read frame: use FrameReaderThread for video, direct read for images
+            if is_image:
+                ret, frame = cap.read()
+                if profiling_enabled:
+                    profiler.checkpoint("1_frame_read")
+            else:
+                # Video mode: get frame from reader thread
+                if frame_reader_thread is not None:
+                    frame = frame_reader_thread.get_frame()
+                    if profiling_enabled:
+                        profiler.checkpoint("1_frame_read")
+                        # Collect timing data from capture thread
+                        frame_reader_thread.collect_timing_data()
+
+                    if frame is None:
+                        break
+                    ret = True
+                else:
+                    # Fallback if thread not initialized
+                    ret, frame = cap.read()
+                    if profiling_enabled:
+                        profiler.checkpoint("1_frame_read")
 
             if not ret:
                 break
@@ -974,6 +1008,8 @@ def main() -> None:
                     display_thread.display(out_frame)
                     if profiling_enabled:
                         profiler.checkpoint("7_display_queue")
+                        # Collect timing data from display thread
+                        display_thread.collect_timing_data()
 
                     if display_thread.is_quit_requested():
                         loop = False
@@ -992,9 +1028,14 @@ def main() -> None:
         raise
 
     finally:
-        # Stop display thread first (if it was started)
+        # Stop frame reader thread first (if it was started)
+        if frame_reader_thread is not None:
+            print("\nStopping frame reader thread...")
+            frame_reader_thread.stop()
+
+        # Stop display thread (if it was started)
         if display_thread is not None:
-            print("\nStopping display thread...")
+            print("Stopping display thread...")
             display_thread.stop()
 
         # Close inference pipeline
@@ -1020,25 +1061,26 @@ def main() -> None:
     overall_end_time = time.time()
     overall_elapsed_time = overall_end_time - overall_start_time
 
-    print("\n" + "=" * 80)
-    print("BASIC PERFORMANCE SUMMARY")
-    print("=" * 80)
-    print(f"Total execution time: {overall_elapsed_time:.6f} seconds")
-    print(f"Total frames processed: {frame_count}")
+    if not is_image:
+        print("\n" + "=" * 80)
+        print("BASIC PERFORMANCE SUMMARY")
+        print("=" * 80)
+        print(f"Total execution time: {overall_elapsed_time:.6f} seconds")
+        print(f"Total frames processed: {frame_count}")
 
-    if overall_elapsed_time > 0:
-        overall_fps = frame_count / overall_elapsed_time
-        print(f"Overall throughput: {overall_fps:.2f} FPS")
+        if overall_elapsed_time > 0:
+            overall_fps = frame_count / overall_elapsed_time
+            print(f"Overall throughput: {overall_fps:.2f} FPS")
 
-    print("=" * 80)
+        print("=" * 80)
 
     if profiling_enabled:
         profiler.print_statistics()
-        
+
         # Export Perfetto trace if requested
         if args.trace:
             profiler.export_perfetto_trace(args.trace)
-        
+
         profiler.draw_stacked_time_chart()
         profiler.draw_detailed_timing_chart()
 

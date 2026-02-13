@@ -213,7 +213,6 @@ Frame 3 → Preprocess → Submit Inference ──────┐     │
                                 Postprocess Frame 1 & Wait Frame 2 inference
                                               │
                                 Postprocess Frame 2 & Wait Frame 3 inference
-
 ```
 
 ### Performance Comparison
@@ -336,13 +335,19 @@ Visualize the trace at:
 
 **Multi-Thread Visualization:**
 
-The trace shows events across **two separate thread rows**:
+The trace shows events across **up to three separate thread rows** (depending on configuration):
 
 **Main Thread (tid: 1)**
 
 - Frame processing pipeline: `frame_read`, `preprocessing`, `inference_submit`, `inference_wait`, `postprocessing`
 - Frame markers showing processing boundaries
 - Queue operations: `display_queue` (sending frames to display thread)
+
+**Capture Thread (tid: 3)** (video mode only)
+
+- Asynchronous frame capture running in parallel
+- `read`: Time to read frame from video source (`cv2.VideoCapture.read`)
+- `queue_put`: Time to queue frame for main thread processing
 
 **Display Thread (tid: 2)** (video mode only)
 
@@ -353,10 +358,11 @@ The trace shows events across **two separate thread rows**:
 
 This separation allows you to:
 
-- **See true parallelism**: Visualize when threads run concurrently
-- **Identify bottlenecks**: Determine if main thread or display thread is limiting performance
-- **Analyze queue behavior**: See if display thread is starved or if frames are backing up
-- **Understand pipeline flow**: Complete end-to-end visibility of all operations
+- **See true parallelism**: Visualize when all threads run concurrently
+- **Identify I/O bottlenecks**: Determine if video reading is slow (capture thread)
+- **Find processing bottlenecks**: Determine if main thread or display thread is limiting performance
+- **Analyze queue behavior**: See if threads are starved or if frames are backing up
+- **Understand complete pipeline**: End-to-end visibility of capture → process → display
 
 **Benefits of Perfetto Trace:**
 
@@ -375,12 +381,20 @@ This separation allows you to:
 │ Hailo Inference Pipeline                            │
 ├─────────────────────────────────────────────────────┤
 │ Main Thread                                         │
-│ ┌─┬────┬────┬───┬────────┬────┬──┐                 │
-│ │●│read│prep│inf│inf_wait│post│q │ Frame 1         │
-│ └─┴────┴────┴───┴────────┴────┴──┘                 │
-│   ┌─┬────┬────┬───┬────────┬────┬──┐               │
-│   │●│read│prep│inf│inf_wait│post│q │ Frame 2       │
-│   └─┴────┴────┴───┴────────┴────┴──┘               │
+│ ┌─┬────┬────┬───┬────────┬────┬──┐                  │
+│ │●│read│prep│inf│inf_wait│post│q │ Frame 1          │
+│ └─┴────┴────┴───┴────────┴────┴──┘                  │
+│   ┌─┬────┬────┬───┬────────┬────┬──┐                │
+│   │●│read│prep│inf│inf_wait│post│q │ Frame 2        │
+│   └─┴────┴────┴───┴────────┴────┴──┘                │
+├─────────────────────────────────────────────────────┤
+│ Capture Thread                                      │
+│ ┌────┬──┐                                           │
+│ │read│qp│ Frame 1                                   │
+│ └────┴──┘                                           │
+│     ┌────┬──┐                                       │
+│     │read│qp│ Frame 2                               │
+│     └────┴──┘                                       │
 ├─────────────────────────────────────────────────────┤
 │ Display Thread                                      │
 │   ┌────┬───────┬────┐                               │
@@ -401,10 +415,11 @@ This separation allows you to:
 **Typical Analysis Use Cases:**
 
 1. **Bottleneck Identification**: See which stage takes longest on which thread
-2. **Parallelism Validation**: Verify display thread runs while main thread processes next frame
-3. **Queue Health**: Check if display thread waits too long (starved) or runs constantly (bottleneck)
-4. **Frame Variance**: Compare timing across frames to spot anomalies
-5. **End-to-End Latency**: Measure complete frame processing time including display
+2. **I/O Performance**: Check if video capture (Capture Thread) is slow
+3. **Parallelism Validation**: Verify all threads run while others process
+4. **Queue Health**: Check if threads wait too long (starved) or run constantly (bottleneck)
+5. **Frame Variance**: Compare timing across frames to spot anomalies
+6. **End-to-End Latency**: Measure complete frame processing time from capture to display
 
 ## Exception Handling
 
@@ -459,7 +474,7 @@ Top 3 predictions:
 - Class labels with confidence scores
 - Real-time FPS counter
 
-### Performance Summary
+### Performance Summary (video mode only)
 
 ```
 ================================================================================
@@ -514,10 +529,12 @@ For detailed debugging, the pipeline prints comprehensive error messages:
 
 ### Pipeline Flow
 
+**Single Image Mode:**
+
 ```
-Input (Image/Video)
+Input (Image)
     ↓
-Frame Reading (threaded for video)
+Frame Reading (synchronous)
     ↓
 Preprocessing (resize, pad, color conversion)
     ↓
@@ -525,10 +542,30 @@ Inference (Hailo device)
     ↓
 Postprocessing (NMS, classification, etc.)
     ↓
-Display (threaded for video)
-    ↓
-Performance Profiling (optional)
+Display (synchronous)
 ```
+
+**Video Mode (Multi-threaded):**
+
+```
+Capture Thread:          Main Thread:              Display Thread:
+Frame Reading      →     Preprocessing       →     Frame Display
+(FrameReaderThread)      ↓                         (DisplayThread)
+     ↓                   Inference                       ↓
+  Queue Buffer           (Hailo device)             Queue Buffer
+                         ↓
+                    Postprocessing
+                         ↓
+                    Performance Profiling
+                       (optional)
+```
+
+**Key Features:**
+
+- **Capture Thread**: Asynchronously reads frames from video file
+- **Main Thread**: Processes frames through inference pipeline
+- **Display Thread**: Asynchronously displays results
+- **All three threads run in parallel for maximum throughput**
 
 ### Class Structure
 
@@ -537,7 +574,13 @@ Performance Profiling (optional)
   - Manages synchronous/asynchronous inference
   - Implements robust exception handling
 
-- **`DisplayThread`**: Asynchronous frame display
+- **`FrameReaderThread`**: Asynchronous frame capture (video mode)
+  - Non-blocking video frame reading
+  - Queue buffering (default: 4 frames)
+  - Parallel I/O with main processing
+  - Thread-specific performance profiling (when enabled)
+
+- **`DisplayThread`**: Asynchronous frame display (video mode)
   - Non-blocking video output
   - Queue management with frame dropping
   - User interaction handling
@@ -558,13 +601,20 @@ Performance Profiling (optional)
 
 For more detailed information about specific features:
 
-- **[DISPLAY_THREAD_TIMING.md](./DISPLAY_THREAD_TIMING.md)**: Technical details about display thread profiling implementation
+- **[FRAMEREADER_INTEGRATION.md](./doc/FRAMEREADER_INTEGRATION.md)**: FrameReaderThread integration details
+  - How asynchronous frame capture works
+  - Performance benefits and comparison
+  - Queue configuration and tuning
+  - Thread lifecycle and error handling
+
+- **[DISPLAY_THREAD_TIMING.md](./doc/DISPLAY_THREAD_TIMING.md)**: Technical details about multi-thread profiling implementation
+  - Display Thread and Capture Thread profiling
   - Thread-safe timing data collection
-  - How timing data flows from display thread to profiler
+  - How timing data flows between threads
   - Implementation notes and performance impact
 
-- **[PERFETTO_VISUALIZATION_GUIDE.md](./PERFETTO_VISUALIZATION_GUIDE.md)**: Complete guide to using Perfetto traces
-  - Visual examples of multi-thread timeline view
+- **[PERFETTO_VISUALIZATION_GUIDE.md](./doc/PERFETTO_VISUALIZATION_GUIDE.md)**: Complete guide to using Perfetto traces
+  - Visual examples of multi-thread timeline view (Main, Capture, Display)
   - How to interpret the trace data
   - Common patterns and what they mean
   - Analysis tips and real-world examples
@@ -608,13 +658,16 @@ This software is licensed under the Apache License 2.0 - see the LICENSE file fo
 
 ---
 
-**Version**: 1.3.0  
+**Version**: 1.4.0  
 **Last Updated**: 2026-02-12  
 **Hailo SDK Compatibility**: 4.0+
 
-**What's New in 1.3.0:**
+**What's New in 1.4.0:**
 
 - Multi-thread profiling with Perfetto trace export
+- FrameReaderThread enabled for asynchronous frame capture in video mode
 - Display thread timing measurements
-- Separate thread visualization in Perfetto UI
+- Capture thread (FrameReaderThread) timing measurements
+- Up to three separate thread views in Perfetto UI (Main, Capture, Display)
+- True three-way parallelism: Capture → Process → Display
 - Enhanced performance analysis capabilities
