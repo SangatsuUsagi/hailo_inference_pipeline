@@ -343,7 +343,7 @@ The trace shows events across **up to three separate thread rows** (depending on
 - Frame markers showing processing boundaries
 - Queue operations: `display_queue` (sending frames to display thread)
 
-**Capture Thread (tid: 3)** (when using FrameReaderThread)
+**Capture Thread (tid: 3)** (video mode only)
 
 - Asynchronous frame capture running in parallel
 - `read`: Time to read frame from video source (`cv2.VideoCapture.read`)
@@ -388,7 +388,7 @@ This separation allows you to:
 │   │●│read│prep│inf│inf_wait│post│q │ Frame 2        │
 │   └─┴────┴────┴───┴────────┴────┴──┘                │
 ├─────────────────────────────────────────────────────┤
-│ Capture Thread (when using FrameReaderThread)       │
+│ Capture Thread                                      │
 │ ┌────┬──┐                                           │
 │ │read│qp│ Frame 1                                   │
 │ └────┴──┘                                           │
@@ -474,7 +474,7 @@ Top 3 predictions:
 - Class labels with confidence scores
 - Real-time FPS counter
 
-### Performance Summary
+### Performance Summary (video mode only)
 
 ```
 ================================================================================
