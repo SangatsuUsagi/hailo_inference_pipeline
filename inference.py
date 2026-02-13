@@ -916,7 +916,7 @@ def main() -> None:
         print("\nStarting inference loop...")
         if profiling_enabled:
             print("Profiling enabled.")
-        print("Press 'q' to quit (video mode only)\n")
+        print("Press 'q' to quit\n")
 
         while loop:
             if profiling_enabled:
@@ -1061,17 +1061,18 @@ def main() -> None:
     overall_end_time = time.time()
     overall_elapsed_time = overall_end_time - overall_start_time
 
-    print("\n" + "=" * 80)
-    print("BASIC PERFORMANCE SUMMARY")
-    print("=" * 80)
-    print(f"Total execution time: {overall_elapsed_time:.6f} seconds")
-    print(f"Total frames processed: {frame_count}")
+    if not is_image:
+        print("\n" + "=" * 80)
+        print("BASIC PERFORMANCE SUMMARY")
+        print("=" * 80)
+        print(f"Total execution time: {overall_elapsed_time:.6f} seconds")
+        print(f"Total frames processed: {frame_count}")
 
-    if overall_elapsed_time > 0:
-        overall_fps = frame_count / overall_elapsed_time
-        print(f"Overall throughput: {overall_fps:.2f} FPS")
+        if overall_elapsed_time > 0:
+            overall_fps = frame_count / overall_elapsed_time
+            print(f"Overall throughput: {overall_fps:.2f} FPS")
 
-    print("=" * 80)
+        print("=" * 80)
 
     if profiling_enabled:
         profiler.print_statistics()
