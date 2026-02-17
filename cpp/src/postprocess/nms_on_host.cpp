@@ -3,6 +3,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <cmath>
+#include <ranges>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -40,8 +41,8 @@ generate_palettes(int num_classes) {
 
         // Complementary: max + min - each channel
         double b = rgb[0], g = rgb[1], r = rgb[2];
-        double mx = std::max({b, g, r});
-        double mn = std::min({b, g, r});
+        double mx = std::ranges::max({b, g, r});
+        double mn = std::ranges::min({b, g, r});
         cv::Scalar comp(mx + mn - b, mx + mn - g, mx + mn - r);
 
         line_palette.push_back(rgb);

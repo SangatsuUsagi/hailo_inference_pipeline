@@ -2,6 +2,8 @@
 
 #include <iostream>
 #include <algorithm>
+#include <ranges>
+#include <span>
 
 // ---------------------------------------------------------------------------
 // Helper utilities
@@ -94,9 +96,9 @@ InferPipeline::InferPipeline(
         // Set output format types
         for (const auto& name : infer_model_->get_output_names()) {
             hailo_format_type_t fmt = HAILO_FORMAT_TYPE_FLOAT32;
-            if (std::find(layer_name_u8_.begin(),  layer_name_u8_.end(),  name) != layer_name_u8_.end())
+            if (std::ranges::find(layer_name_u8_, name) != layer_name_u8_.end())
                 fmt = HAILO_FORMAT_TYPE_UINT8;
-            else if (std::find(layer_name_u16_.begin(), layer_name_u16_.end(), name) != layer_name_u16_.end())
+            else if (std::ranges::find(layer_name_u16_, name) != layer_name_u16_.end())
                 fmt = HAILO_FORMAT_TYPE_UINT16;
             infer_model_->output(name).set_format_type(fmt);
         }
@@ -202,8 +204,8 @@ void InferPipeline::infer_async(const std::vector<cv::Mat>& inputs) {
         // NOTE: API: ConfiguredInferModel::output(name) returns InferStream& in most versions.
         size_t frame_size = configured_infer_model_.output(out_name).get_frame_size();
 
-        bool is_u8  = std::find(layer_name_u8_.begin(),  layer_name_u8_.end(),  out_name) != layer_name_u8_.end();
-        bool is_u16 = std::find(layer_name_u16_.begin(), layer_name_u16_.end(), out_name) != layer_name_u16_.end();
+        bool is_u8  = std::ranges::find(layer_name_u8_,  out_name) != layer_name_u8_.end();
+        bool is_u16 = std::ranges::find(layer_name_u16_, out_name) != layer_name_u16_.end();
 
         if (is_nms_ || is_u8) {
             // Raw byte buffer for NMS or explicit uint8 layers
@@ -396,21 +398,20 @@ OutputMap InferPipeline::infer_pipeline(const std::vector<cv::Mat>& inputs) {
 //   For each class (num_classes total):
 //     [uint16_t count][count × {float y_min, x_min, y_max, x_max, score}]
 void InferPipeline::parse_nms_buffer(
-    const hailort::MemoryView& buf,
+    std::span<const uint8_t> buf,
     const std::string& /*name*/,
     InferenceOutput& out)
 {
-    const uint8_t* ptr = static_cast<const uint8_t*>(buf.data());
     size_t offset = 0;
 
     while (offset + sizeof(uint16_t) <= buf.size()) {
-        uint16_t count = *reinterpret_cast<const uint16_t*>(ptr + offset);
+        uint16_t count = *reinterpret_cast<const uint16_t*>(buf.data() + offset);
         offset += sizeof(uint16_t);
 
         ClassDetections class_dets;
         constexpr size_t kDetSize = 5 * sizeof(float);
         for (uint16_t i = 0; i < count && offset + kDetSize <= buf.size(); ++i) {
-            const float* b = reinterpret_cast<const float*>(ptr + offset);
+            const float* b = reinterpret_cast<const float*>(buf.data() + offset);
             class_dets.push_back({b[0], b[1], b[2], b[3], b[4]});
             offset += kDetSize;
         }
@@ -423,6 +424,5 @@ void InferPipeline::parse_nms_buffer_raw(
     const std::string& name,
     InferenceOutput& out)
 {
-    hailort::MemoryView view(const_cast<uint8_t*>(raw.data()), raw.size());
-    parse_nms_buffer(view, name, out);
+    parse_nms_buffer(std::span{raw}, name, out);
 }

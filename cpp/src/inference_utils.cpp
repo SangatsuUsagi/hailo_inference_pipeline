@@ -5,6 +5,7 @@
 #include <numeric>
 #include <cmath>
 #include <fstream>
+#include <ranges>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -40,7 +41,7 @@ void PerformanceProfiler::end_frame() {
 
 void PerformanceProfiler::add_checkpoint_entry(const std::string& name, double dur) {
     checkpoints[name].push_back(dur);
-    if (std::find(frame_order.begin(), frame_order.end(), name) == frame_order.end())
+    if (std::ranges::find(frame_order, name) == frame_order.end())
         frame_order.push_back(name);
 }
 
@@ -71,8 +72,8 @@ void PerformanceProfiler::print_statistics() const {
         if (it == checkpoints.end() || it->second.empty()) continue;
 
         const auto& times = it->second;
-        double min_t = *std::min_element(times.begin(), times.end()) * 1000.0;
-        double max_t = *std::max_element(times.begin(), times.end()) * 1000.0;
+        double min_t = std::ranges::min(times) * 1000.0;
+        double max_t = std::ranges::max(times) * 1000.0;
         double mean  = std::accumulate(times.begin(), times.end(), 0.0) / times.size() * 1000.0;
         double var   = 0.0;
         for (double t : times) {
@@ -242,13 +243,12 @@ DisplayThread::~DisplayThread() {
 }
 
 void DisplayThread::start() {
-    should_stop_ = false;
     quit_requested_ = false;
-    thread_ = std::thread(&DisplayThread::display_loop, this);
+    thread_ = std::jthread([this](std::stop_token st) { display_loop(st); });
 }
 
-void DisplayThread::display_loop() {
-    while (!should_stop_) {
+void DisplayThread::display_loop(std::stop_token stoken) {
+    while (!stoken.stop_requested()) {
         std::optional<cv::Mat> item;
         auto t0 = steady_clock::now();
         bool got = frame_queue_.pop(item, milliseconds(1000));
@@ -296,8 +296,7 @@ void DisplayThread::collect_timing_data() {
 
     auto add = [this](const std::string& name, double dur) {
         profiler_->checkpoints[name].push_back(dur);
-        if (std::find(profiler_->frame_order.begin(), profiler_->frame_order.end(), name)
-                == profiler_->frame_order.end())
+        if (std::ranges::find(profiler_->frame_order, name) == profiler_->frame_order.end())
             profiler_->frame_order.push_back(name);
     };
     add("display_queue_wait", td.queue_wait);
@@ -306,8 +305,8 @@ void DisplayThread::collect_timing_data() {
 }
 
 void DisplayThread::stop() {
-    should_stop_ = true;
-    frame_queue_.try_push(std::nullopt); // sentinel
+    frame_queue_.try_push(std::nullopt); // sentinel to wake blocked pop
+    thread_.request_stop();
     if (thread_.joinable()) thread_.join();
     cv::destroyAllWindows();
 }
@@ -331,13 +330,12 @@ FrameReaderThread::~FrameReaderThread() {
 }
 
 void FrameReaderThread::start() {
-    should_stop_ = false;
-    read_error_  = false;
-    thread_ = std::thread(&FrameReaderThread::read_loop, this);
+    read_error_ = false;
+    thread_ = std::jthread([this](std::stop_token st) { read_loop(st); });
 }
 
-void FrameReaderThread::read_loop() {
-    while (!should_stop_) {
+void FrameReaderThread::read_loop(std::stop_token stoken) {
+    while (!stoken.stop_requested()) {
         cv::Mat frame;
         auto t0 = steady_clock::now();
         bool ok = video_source_.read(frame);
@@ -379,8 +377,7 @@ void FrameReaderThread::collect_timing_data() {
 
     auto add = [this](const std::string& name, double dur) {
         profiler_->checkpoints[name].push_back(dur);
-        if (std::find(profiler_->frame_order.begin(), profiler_->frame_order.end(), name)
-                == profiler_->frame_order.end())
+        if (std::ranges::find(profiler_->frame_order, name) == profiler_->frame_order.end())
             profiler_->frame_order.push_back(name);
     };
     add("capture_read",      td.read);
@@ -388,6 +385,6 @@ void FrameReaderThread::collect_timing_data() {
 }
 
 void FrameReaderThread::stop() {
-    should_stop_ = true;
+    thread_.request_stop();
     if (thread_.joinable()) thread_.join();
 }

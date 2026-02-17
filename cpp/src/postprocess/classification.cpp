@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <numeric>
+#include <ranges>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -73,8 +74,8 @@ cv::Mat ImagePostprocessorClassification::postprocess(
         std::vector<size_t> indices(data.size());
         std::iota(indices.begin(), indices.end(), 0);
         size_t n = std::min(static_cast<size_t>(top_n_), data.size());
-        std::partial_sort(indices.begin(), indices.begin() + n, indices.end(),
-                          [&data](size_t a, size_t b){ return data[a] > data[b]; });
+        std::ranges::partial_sort(indices, indices.begin() + static_cast<std::ptrdiff_t>(n),
+                                  [&data](size_t a, size_t b){ return data[a] > data[b]; });
 
         display_strings.push_back("Output: " + key);
         for (size_t i = 0; i < n; ++i) {

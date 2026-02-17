@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <ranges>
 
 // ---------------------------------------------------------------------------
 // Anchor generation
@@ -212,11 +213,9 @@ ImagePostprocessorPalmDetection::weighted_nms(
     if (dets.empty()) return {};
 
     float suppress_thresh = model_configs_["min_suppression_threshold"].get<float>();
-    int num_coords        = model_configs_["num_coords"].get<int>();
 
     // Sort by score descending
-    std::sort(dets.begin(), dets.end(),
-              [](const Detection& a, const Detection& b){ return a.score > b.score; });
+    std::ranges::sort(dets, [](const Detection& a, const Detection& b){ return a.score > b.score; });
 
     std::vector<bool> remaining(dets.size(), true);
     std::vector<Detection> output;
@@ -244,7 +243,7 @@ ImagePostprocessorPalmDetection::weighted_nms(
 
             // Zero out coords
             weighted.y_min = weighted.x_min = weighted.y_max = weighted.x_max = 0.0f;
-            std::fill(weighted.keypoints.begin(), weighted.keypoints.end(), 0.0f);
+            std::ranges::fill(weighted.keypoints, 0.0f);
 
             for (size_t idx : overlapping) {
                 float w = dets[idx].score;

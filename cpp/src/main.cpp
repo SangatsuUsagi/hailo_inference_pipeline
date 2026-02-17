@@ -3,12 +3,13 @@
 #include <vector>
 #include <memory>
 #include <chrono>
-#include <cstring>
 #include <filesystem>
+#include <ranges>
 
 #include <hailo/hailort.hpp>
 #include <opencv2/opencv.hpp>
 
+#include "CLI11.hpp"
 #include "exceptions.hpp"
 #include "inference_pipeline.hpp"
 #include "inference_utils.hpp"
@@ -19,9 +20,6 @@
 namespace fs = std::filesystem;
 using clock_t_ = std::chrono::steady_clock;
 
-// ---------------------------------------------------------------------------
-// Simple argument parser
-// ---------------------------------------------------------------------------
 struct Args {
     std::string image_path;
     std::string net_path         = "./hefs/resnet_v1_50.hef";
@@ -33,51 +31,6 @@ struct Args {
     bool use_callback = false;
     bool profile      = false;
 };
-
-static void print_usage(const char* prog) {
-    std::cerr <<
-        "Usage: " << prog << " IMAGE_OR_VIDEO [OPTIONS]\n"
-        "\n"
-        "Options:\n"
-        "  -n, --net PATH        Path to HEF model file (default: ./hefs/resnet_v1_50.hef)\n"
-        "  -p, --postprocess TYPE  classification | nms_on_host | palm_detection\n"
-        "  -c, --config PATH     JSON config file path\n"
-        "  -b, --batch-size N    Batch size (default: 1)\n"
-        "  -s, --synchronous     Use synchronous inference\n"
-        "  --callback            Use callback with async inference\n"
-        "  --profile             Enable profiling\n"
-        "  --trace FILE          Export Perfetto trace JSON (requires --profile)\n"
-        "  -h, --help            Show this help\n";
-}
-
-static Args parse_args(int argc, char** argv) {
-    Args args;
-    if (argc < 2) { print_usage(argv[0]); exit(1); }
-
-    for (int i = 1; i < argc; ++i) {
-        std::string a = argv[i];
-        if (a == "-h" || a == "--help") { print_usage(argv[0]); exit(0); }
-        else if ((a == "-n" || a == "--net")         && i + 1 < argc) args.net_path        = argv[++i];
-        else if ((a == "-p" || a == "--postprocess") && i + 1 < argc) args.postprocess_type = argv[++i];
-        else if ((a == "-c" || a == "--config")      && i + 1 < argc) args.config_path     = argv[++i];
-        else if ((a == "-b" || a == "--batch-size")  && i + 1 < argc) args.batch_size      = std::stoi(argv[++i]);
-        else if ((a == "-s" || a == "--synchronous"))  args.synchronous  = true;
-        else if (a == "--callback")                    args.use_callback = true;
-        else if (a == "--profile")                     args.profile      = true;
-        else if (a == "--trace" && i + 1 < argc)       args.trace_path   = argv[++i];
-        else if (a[0] != '-' && args.image_path.empty()) args.image_path = a;
-        else { std::cerr << "Unknown argument: " << a << "\n"; print_usage(argv[0]); exit(1); }
-    }
-
-    if (args.image_path.empty()) {
-        std::cerr << "Error: No input image/video specified.\n";
-        print_usage(argv[0]); exit(1);
-    }
-    if (!args.trace_path.empty() && !args.profile) {
-        std::cerr << "Error: --trace requires --profile\n"; exit(1);
-    }
-    return args;
-}
 
 // ---------------------------------------------------------------------------
 // Format and print vstream info; returns {{name, {H,W}}, ...}
@@ -107,7 +60,30 @@ static std::vector<VStreamInfo> print_vstream_infos(
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
-    Args args = parse_args(argc, argv);
+    Args args;
+
+    CLI::App app{"Hailo Inference Pipeline - deep learning inference on Hailo AI accelerators"};
+    app.add_option("input", args.image_path, "Input image or video file")->required();
+    app.add_option("-n,--net", args.net_path,
+                   "Path to HEF model file")->capture_default_str();
+    app.add_option("-p,--postprocess", args.postprocess_type,
+                   "Postprocess type: classification | nms_on_host | palm_detection")
+        ->capture_default_str();
+    app.add_option("-c,--config", args.config_path, "JSON config file path");
+    app.add_option("-b,--batch-size", args.batch_size, "Batch size")->capture_default_str();
+    app.add_flag("-s,--synchronous", args.synchronous, "Use synchronous inference");
+    app.add_flag("--callback", args.use_callback,
+                 "Use callback mode with async inference");
+    app.add_flag("--profile", args.profile, "Enable performance profiling");
+    app.add_option("--trace", args.trace_path,
+                   "Export Perfetto trace JSON (requires --profile)");
+
+    CLI11_PARSE(app, argc, argv);
+
+    if (!args.trace_path.empty() && !args.profile) {
+        std::cerr << "Error: --trace requires --profile\n";
+        return 1;
+    }
 
     PerformanceProfiler profiler;
     PerformanceProfiler* prof_ptr = args.profile ? &profiler : nullptr;
@@ -157,7 +133,7 @@ int main(int argc, char** argv) {
 
         std::cout << "VStream infos(outputs):\n";
         auto out_meta = print_vstream_infos(out_infos, false);
-        for (const auto& m : out_meta) if (m.is_nms) { is_nms = true; break; }
+        is_nms = std::ranges::any_of(out_meta, &VStreamInfo::is_nms);
 
         // --- Create InferPipeline ---
         infer = std::make_unique<InferPipeline>(
