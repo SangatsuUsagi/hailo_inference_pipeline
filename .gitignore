@@ -1,4 +1,5 @@
 .python-version
+CLAUDE.md
 *.log
 hefs/*.hef
 notebook/*.dot
