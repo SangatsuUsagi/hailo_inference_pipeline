@@ -1,4 +1,5 @@
 .python-version
+.clang-format
 CLAUDE.md
 *.log
 hefs/*.hef
