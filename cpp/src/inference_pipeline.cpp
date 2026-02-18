@@ -92,8 +92,9 @@ InferPipeline::InferPipeline(const std::string &net_path, int batch_size,
         fmt = HAILO_FORMAT_TYPE_UINT16;
       auto out_stream_exp = infer_model_->output(name);
       if (!out_stream_exp)
-        throw std::runtime_error("Failed to get output stream '" + name +
-                                 "': " + std::to_string(out_stream_exp.status()));
+        throw std::runtime_error(
+            "Failed to get output stream '" + name +
+            "': " + std::to_string(out_stream_exp.status()));
       out_stream_exp->set_format_type(fmt);
     }
 
@@ -188,8 +189,8 @@ void InferPipeline::infer_async(const std::vector<cv::Mat> &inputs) {
     if (!in_stream_exp)
       throw InferenceSubmitError("Failed to get input stream '" +
                                  input_names[i] + "'");
-    auto status = in_stream_exp->set_buffer(hailort::MemoryView(
-        cont.data, cont.total() * cont.elemSize()));
+    auto status = in_stream_exp->set_buffer(
+        hailort::MemoryView(cont.data, cont.total() * cont.elemSize()));
     if (is_hailo_error(status))
       throw InferenceSubmitError("Failed to set input buffer '" +
                                  input_names[i] + "'");
