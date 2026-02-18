@@ -8,15 +8,27 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(OpenCV REQUIRED)
 find_package(HailoRT REQUIRED)
 
+include(FetchContent)
+
 # nlohmann/json - prefer system package, fallback to FetchContent
 find_package(nlohmann_json QUIET)
 if(NOT nlohmann_json_FOUND)
-    include(FetchContent)
     FetchContent_Declare(
         nlohmann_json
         URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
     )
     FetchContent_MakeAvailable(nlohmann_json)
+endif()
+
+# CLI11 - prefer system package, fallback to FetchContent
+find_package(CLI11 QUIET)
+if(NOT CLI11_FOUND)
+    FetchContent_Declare(
+        CLI11
+        GIT_REPOSITORY https://github.com/CLIUtils/CLI11
+        GIT_TAG v2.4.2
+    )
+    FetchContent_MakeAvailable(CLI11)
 endif()
 
 # Source files
@@ -40,6 +52,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ${OpenCV_LIBS}
     HailoRT::libhailort
     nlohmann_json::nlohmann_json
+    CLI11::CLI11
     pthread
 )
 

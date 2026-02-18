@@ -9,13 +9,13 @@
 #include <hailo/hailort.hpp>
 #include <opencv2/opencv.hpp>
 
-#include "CLI11.hpp"
 #include "exceptions.hpp"
 #include "inference_pipeline.hpp"
 #include "inference_utils.hpp"
 #include "postprocess/classification.hpp"
 #include "postprocess/nms_on_host.hpp"
 #include "postprocess/palm_detection.hpp"
+#include <CLI/CLI.hpp>
 
 namespace fs = std::filesystem;
 using clock_t_ = std::chrono::steady_clock;
