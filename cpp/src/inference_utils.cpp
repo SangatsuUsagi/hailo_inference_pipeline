@@ -39,8 +39,7 @@ void PerformanceProfiler::end_frame() {
   }
 }
 
-void PerformanceProfiler::add_checkpoint_entry(const std::string &name,
-                                               double dur) {
+void PerformanceProfiler::add_checkpoint_entry(const std::string &name, double dur) {
   checkpoints[name].push_back(dur);
   if (std::ranges::find(frame_order, name) == frame_order.end())
     frame_order.push_back(name);
@@ -57,10 +56,9 @@ void PerformanceProfiler::print_statistics() const {
     return;
   }
 
-  std::cout << std::left << std::setw(30) << "Checkpoint" << std::right
-            << std::setw(8) << "Count" << std::setw(12) << "Min(ms)"
-            << std::setw(12) << "Max(ms)" << std::setw(12) << "Mean(ms)"
-            << std::setw(12) << "Var(ms²)"
+  std::cout << std::left << std::setw(30) << "Checkpoint" << std::right << std::setw(8) << "Count"
+            << std::setw(12) << "Min(ms)" << std::setw(12) << "Max(ms)" << std::setw(12)
+            << "Mean(ms)" << std::setw(12) << "Var(ms²)"
             << "\n";
   std::cout << std::string(W, '-') << "\n";
 
@@ -73,8 +71,7 @@ void PerformanceProfiler::print_statistics() const {
     const auto &times = it->second;
     double min_t = std::ranges::min(times) * 1000.0;
     double max_t = std::ranges::max(times) * 1000.0;
-    double mean = std::accumulate(times.begin(), times.end(), 0.0) /
-                  times.size() * 1000.0;
+    double mean = std::accumulate(times.begin(), times.end(), 0.0) / times.size() * 1000.0;
     double var = 0.0;
     for (double t : times) {
       double d = t * 1000.0 - mean;
@@ -82,9 +79,8 @@ void PerformanceProfiler::print_statistics() const {
     }
     var /= times.size();
 
-    std::cout << std::left << std::setw(30) << name << std::right
-              << std::setw(8) << times.size() << std::fixed
-              << std::setprecision(3) << std::setw(12) << min_t << std::setw(12)
+    std::cout << std::left << std::setw(30) << name << std::right << std::setw(8) << times.size()
+              << std::fixed << std::setprecision(3) << std::setw(12) << min_t << std::setw(12)
               << max_t << std::setw(12) << mean << std::setw(12) << var << "\n";
   }
 
@@ -92,8 +88,7 @@ void PerformanceProfiler::print_statistics() const {
 
   auto it = checkpoints.find("total_frame_time");
   if (it != checkpoints.end() && !it->second.empty()) {
-    double avg = std::accumulate(it->second.begin(), it->second.end(), 0.0) /
-                 it->second.size();
+    double avg = std::accumulate(it->second.begin(), it->second.end(), 0.0) / it->second.size();
     double fps = avg > 0 ? 1.0 / avg : 0.0;
     std::cout << "\nAverage Frame Processing Time: " << avg * 1000.0 << " ms\n";
     std::cout << "Average FPS (from frame time): " << fps << "\n";
@@ -102,8 +97,7 @@ void PerformanceProfiler::print_statistics() const {
   std::cout << std::string(W, '=') << "\n\n";
 }
 
-void PerformanceProfiler::export_perfetto_trace(
-    const std::string &output_path) const {
+void PerformanceProfiler::export_perfetto_trace(const std::string &output_path) const {
   if (checkpoints.empty()) {
     std::cout << "No profiling data to export.\n";
     return;
@@ -133,8 +127,7 @@ void PerformanceProfiler::export_perfetto_trace(
 
   // Determine frame count
   const auto &first_cp =
-      main_cps.empty() ? (display_cps.empty() ? capture_cps[0] : display_cps[0])
-                       : main_cps[0];
+      main_cps.empty() ? (display_cps.empty() ? capture_cps[0] : display_cps[0]) : main_cps[0];
   size_t num_frames = checkpoints.at(first_cp).size();
 
   json trace_events = json::array();
@@ -153,8 +146,8 @@ void PerformanceProfiler::export_perfetto_trace(
     cur_us += frame_dur;
   }
 
-  auto add_events = [&](const std::vector<std::string> &cps, int tid,
-                        const std::string &cat, const std::string &prefix) {
+  auto add_events = [&](const std::vector<std::string> &cps, int tid, const std::string &cat,
+                        const std::string &prefix) {
     for (size_t f = 0; f < num_frames; ++f) {
       long long start_us = frame_ts[f];
 
@@ -238,8 +231,8 @@ void PerformanceProfiler::export_perfetto_trace(
 
 DisplayThread::DisplayThread(const std::string &window_name, int max_queue_size,
                              PerformanceProfiler *profiler)
-    : window_name_(window_name), frame_queue_(max_queue_size),
-      profiler_(profiler), timing_queue_(256) {}
+    : window_name_(window_name), frame_queue_(max_queue_size), profiler_(profiler),
+      timing_queue_(256) {}
 
 DisplayThread::~DisplayThread() { stop(); }
 
@@ -299,8 +292,7 @@ void DisplayThread::collect_timing_data() {
 
   auto add = [this](const std::string &name, double dur) {
     profiler_->checkpoints[name].push_back(dur);
-    if (std::ranges::find(profiler_->frame_order, name) ==
-        profiler_->frame_order.end())
+    if (std::ranges::find(profiler_->frame_order, name) == profiler_->frame_order.end())
       profiler_->frame_order.push_back(name);
   };
   add("display_queue_wait", td.queue_wait);
@@ -320,11 +312,10 @@ void DisplayThread::stop() {
 // FrameReaderThread
 // ============================================================================
 
-FrameReaderThread::FrameReaderThread(cv::VideoCapture &video_source,
-                                     int max_queue_size,
+FrameReaderThread::FrameReaderThread(cv::VideoCapture &video_source, int max_queue_size,
                                      PerformanceProfiler *profiler)
-    : video_source_(video_source), frame_queue_(max_queue_size),
-      profiler_(profiler), timing_queue_(256) {}
+    : video_source_(video_source), frame_queue_(max_queue_size), profiler_(profiler),
+      timing_queue_(256) {}
 
 FrameReaderThread::~FrameReaderThread() { stop(); }
 
@@ -348,8 +339,7 @@ void FrameReaderThread::read_loop(std::stop_token stoken) {
     }
 
     auto t1 = steady_clock::now();
-    bool pushed =
-        frame_queue_.push(std::make_optional(frame), milliseconds(1000));
+    bool pushed = frame_queue_.push(std::make_optional(frame), milliseconds(1000));
     double put_t = duration<double>(steady_clock::now() - t1).count();
 
     if (!pushed)
@@ -380,8 +370,7 @@ void FrameReaderThread::collect_timing_data() {
 
   auto add = [this](const std::string &name, double dur) {
     profiler_->checkpoints[name].push_back(dur);
-    if (std::ranges::find(profiler_->frame_order, name) ==
-        profiler_->frame_order.end())
+    if (std::ranges::find(profiler_->frame_order, name) == profiler_->frame_order.end())
       profiler_->frame_order.push_back(name);
   };
   add("capture_read", td.read);
