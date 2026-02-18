@@ -1,13 +1,13 @@
 #pragma once
-#include <string>
-#include <vector>
 #include <array>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 /// A single detection bounding box with confidence score.
 /// Coordinates: y_min, x_min, y_max, x_max (normalized), confidence
 struct DetectionBox {
-    float y_min, x_min, y_max, x_max, confidence;
+  float y_min, x_min, y_max, x_max, confidence;
 };
 
 /// Per-class list of detections (used for NMS output)
@@ -18,15 +18,15 @@ using NmsOutput = std::vector<ClassDetections>;
 
 /// Regular (non-NMS) tensor output: flat float32 data + shape
 struct RegularOutput {
-    std::vector<float> data;
-    std::vector<size_t> shape;
+  std::vector<float> data;
+  std::vector<size_t> shape;
 };
 
 /// Unified inference output - either regular float tensor or NMS per-class detections
 struct InferenceOutput {
-    bool is_nms = false;
-    RegularOutput regular;
-    NmsOutput nms;
+  bool is_nms = false;
+  RegularOutput regular;
+  NmsOutput nms;
 };
 
 /// Map from layer name to inference output
