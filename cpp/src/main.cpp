@@ -41,20 +41,18 @@ struct VStreamInfo {
   bool is_nms;
 };
 
-static std::vector<VStreamInfo>
-print_vstream_infos(const std::vector<hailo_vstream_info_t> &infos,
-                    bool is_input) {
+static std::vector<VStreamInfo> print_vstream_infos(const std::vector<hailo_vstream_info_t> &infos,
+                                                    bool is_input) {
   std::vector<VStreamInfo> result;
   for (size_t i = 0; i < infos.size(); ++i) {
     const auto &vi = infos[i];
     std::string kind = is_input ? "Input" : "Output";
     bool nms = (vi.format.order == HAILO_FORMAT_ORDER_HAILO_NMS_BY_CLASS ||
                 vi.format.order == HAILO_FORMAT_ORDER_HAILO_NMS);
-    std::cout << kind << " #" << i << " " << vi.name << (nms ? " [NMS]" : "")
-              << " (" << vi.shape.height << "x" << vi.shape.width << "x"
-              << vi.shape.features << ")\n";
-    result.push_back({vi.name, static_cast<int>(vi.shape.height),
-                      static_cast<int>(vi.shape.width), nms});
+    std::cout << kind << " #" << i << " " << vi.name << (nms ? " [NMS]" : "") << " ("
+              << vi.shape.height << "x" << vi.shape.width << "x" << vi.shape.features << ")\n";
+    result.push_back(
+        {vi.name, static_cast<int>(vi.shape.height), static_cast<int>(vi.shape.width), nms});
   }
   return result;
 }
@@ -67,24 +65,17 @@ int main(int argc, char **argv) {
 
   CLI::App app{"Hailo Inference Pipeline - deep learning inference on Hailo AI "
                "accelerators"};
-  app.add_option("input", args.image_path, "Input image or video file")
-      ->required();
-  app.add_option("-n,--net", args.net_path, "Path to HEF model file")
-      ->capture_default_str();
-  app.add_option(
-         "-p,--postprocess", args.postprocess_type,
-         "Postprocess type: classification | nms_on_host | palm_detection")
+  app.add_option("input", args.image_path, "Input image or video file")->required();
+  app.add_option("-n,--net", args.net_path, "Path to HEF model file")->capture_default_str();
+  app.add_option("-p,--postprocess", args.postprocess_type,
+                 "Postprocess type: classification | nms_on_host | palm_detection")
       ->capture_default_str();
   app.add_option("-c,--config", args.config_path, "JSON config file path");
-  app.add_option("-b,--batch-size", args.batch_size, "Batch size")
-      ->capture_default_str();
-  app.add_flag("-s,--synchronous", args.synchronous,
-               "Use synchronous inference");
-  app.add_flag("--callback", args.use_callback,
-               "Use callback mode with async inference");
+  app.add_option("-b,--batch-size", args.batch_size, "Batch size")->capture_default_str();
+  app.add_flag("-s,--synchronous", args.synchronous, "Use synchronous inference");
+  app.add_flag("--callback", args.use_callback, "Use callback mode with async inference");
   app.add_flag("--profile", args.profile, "Enable performance profiling");
-  app.add_option("--trace", args.trace_path,
-                 "Export Perfetto trace JSON (requires --profile)");
+  app.add_option("--trace", args.trace_path, "Export Perfetto trace JSON (requires --profile)");
 
   CLI11_PARSE(app, argc, argv);
 
@@ -115,8 +106,7 @@ int main(int argc, char **argv) {
     // --- Load HEF and inspect streams ---
     auto hef_exp = hailort::Hef::create(args.net_path);
     if (!hef_exp)
-      throw std::runtime_error("Failed to load HEF: " +
-                               std::to_string(hef_exp.status()));
+      throw std::runtime_error("Failed to load HEF: " + std::to_string(hef_exp.status()));
     auto &hef = hef_exp.value();
 
     auto in_infos_exp = hef.get_input_vstream_infos();
@@ -144,10 +134,9 @@ int main(int argc, char **argv) {
     is_nms = std::ranges::any_of(out_meta, &VStreamInfo::is_nms);
 
     // --- Create InferPipeline ---
-    infer = std::make_unique<InferPipeline>(
-        args.net_path, args.batch_size, is_async, is_callback, is_nms,
-        std::vector<std::string>{}, // layer_name_u8
-        std::vector<std::string>{}  // layer_name_u16
+    infer = std::make_unique<InferPipeline>(args.net_path, args.batch_size, is_async, is_callback,
+                                            is_nms, std::vector<std::string>{}, // layer_name_u8
+                                            std::vector<std::string>{}          // layer_name_u16
     );
 
     // --- Open video/image ---
@@ -162,8 +151,7 @@ int main(int argc, char **argv) {
     cv::Mat dummy(static_cast<int>(cap->get(cv::CAP_PROP_FRAME_HEIGHT)),
                   static_cast<int>(cap->get(cv::CAP_PROP_FRAME_WIDTH)), CV_8UC3,
                   cv::Scalar(0, 0, 0));
-    auto [_, scale_init, pad_init] =
-        preprocess_image_with_pad(dummy, input_H, input_W);
+    auto [_, scale_init, pad_init] = preprocess_image_with_pad(dummy, input_H, input_W);
 
     using Params = std::pair<std::pair<float, float>, std::pair<int, int>>;
     Params pp_params = {scale_init, pad_init};
@@ -171,22 +159,16 @@ int main(int argc, char **argv) {
     // --- Select postprocessor ---
     std::unique_ptr<PostprocessBase> postprocessor;
     if (args.postprocess_type == "nms_on_host") {
-      std::string cfg =
-          args.config_path.empty() ? "./configs/yolov8.json" : args.config_path;
-      postprocessor =
-          std::make_unique<ImagePostprocessorNmsOnHost>(pp_params, cfg);
+      std::string cfg = args.config_path.empty() ? "./configs/yolov8.json" : args.config_path;
+      postprocessor = std::make_unique<ImagePostprocessorNmsOnHost>(pp_params, cfg);
     } else if (args.postprocess_type == "palm_detection") {
-      std::string cfg = args.config_path.empty()
-                            ? "./configs/palm_detection_full.json"
-                            : args.config_path;
-      postprocessor =
-          std::make_unique<ImagePostprocessorPalmDetection>(pp_params, cfg);
+      std::string cfg =
+          args.config_path.empty() ? "./configs/palm_detection_full.json" : args.config_path;
+      postprocessor = std::make_unique<ImagePostprocessorPalmDetection>(pp_params, cfg);
     } else { // classification (default)
-      std::string cfg = args.config_path.empty()
-                            ? "./configs/class_names_imagenet.json"
-                            : args.config_path;
-      postprocessor =
-          std::make_unique<ImagePostprocessorClassification>(pp_params, cfg, 3);
+      std::string cfg =
+          args.config_path.empty() ? "./configs/class_names_imagenet.json" : args.config_path;
+      postprocessor = std::make_unique<ImagePostprocessorClassification>(pp_params, cfg, 3);
     }
 
     is_image = static_cast<int>(cap->get(cv::CAP_PROP_FRAME_COUNT)) <= 1;
@@ -237,8 +219,7 @@ int main(int argc, char **argv) {
         break;
 
       // --- Preprocess ---
-      auto [input_frame, scale, pad] =
-          preprocess_image_with_pad(frame, input_H, input_W);
+      auto [input_frame, scale, pad] = preprocess_image_with_pad(frame, input_H, input_W);
       if (args.profile)
         profiler.checkpoint("2_preprocessing");
 
@@ -289,20 +270,17 @@ int main(int argc, char **argv) {
         }
 
       } catch (const InferenceTimeoutError &e) {
-        std::cerr << "Inference timeout (frame " << frame_count
-                  << "): " << e.what() << "\n";
+        std::cerr << "Inference timeout (frame " << frame_count << "): " << e.what() << "\n";
         continue;
       } catch (const InferenceSubmitError &e) {
-        std::cerr << "Failed to submit inference (frame " << frame_count
-                  << "): " << e.what() << "\n";
+        std::cerr << "Failed to submit inference (frame " << frame_count << "): " << e.what()
+                  << "\n";
         break;
       } catch (const InferenceWaitError &e) {
-        std::cerr << "Failed to get results (frame " << frame_count
-                  << "): " << e.what() << "\n";
+        std::cerr << "Failed to get results (frame " << frame_count << "): " << e.what() << "\n";
         continue;
       } catch (const InferencePipelineError &e) {
-        std::cerr << "Sync inference failed (frame " << frame_count
-                  << "): " << e.what() << "\n";
+        std::cerr << "Sync inference failed (frame " << frame_count << "): " << e.what() << "\n";
         break;
       }
 
@@ -334,8 +312,7 @@ int main(int argc, char **argv) {
 
   // --- Performance summary ---
   auto overall_end = clock_t_::now();
-  double overall_elapsed =
-      std::chrono::duration<double>(overall_end - overall_start).count();
+  double overall_elapsed = std::chrono::duration<double>(overall_end - overall_start).count();
 
   // is_image was set before cap was released; use it directly here
   if (!is_image) {
@@ -345,8 +322,7 @@ int main(int argc, char **argv) {
     std::cout << "Total execution time: " << overall_elapsed << " seconds\n";
     std::cout << "Total frames processed: " << frame_count << "\n";
     if (overall_elapsed > 0)
-      std::cout << "Overall throughput: " << frame_count / overall_elapsed
-                << " FPS\n";
+      std::cout << "Overall throughput: " << frame_count / overall_elapsed << " FPS\n";
     std::cout << std::string(80, '=') << "\n";
   }
 
