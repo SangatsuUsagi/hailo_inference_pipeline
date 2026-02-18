@@ -1,4 +1,5 @@
 #pragma once
+#include <map>
 #include <string>
 #include <vector>
 #include <span>
@@ -86,6 +87,6 @@ private:
     // Sync mode
     std::unique_ptr<hailort::Hef>                          hef_;
     std::shared_ptr<hailort::ConfiguredNetworkGroup>       network_group_;
-    std::vector<hailort::InputVStreamParams>               input_vstream_params_;
-    std::vector<hailort::OutputVStreamParams>              output_vstream_params_;
+    std::map<std::string, hailo_vstream_params_t>          input_vstream_params_;
+    std::map<std::string, hailo_vstream_params_t>          output_vstream_params_;
 };
