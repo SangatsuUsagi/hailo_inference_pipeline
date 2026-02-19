@@ -103,7 +103,7 @@ InferPipeline::InferPipeline(const std::string &net_path, int batch_size, bool i
     if (!cfg_exp)
       throw std::runtime_error("Failed to configure infer model: " +
                                std::to_string(cfg_exp.status()));
-    configured_infer_model_ = cfg_exp.release();
+    configured_infer_model_.emplace(cfg_exp.release());
 
   } else {
     // ---- Sync (VStreams) path ----
@@ -146,7 +146,11 @@ InferPipeline::InferPipeline(const std::string &net_path, int batch_size, bool i
 InferPipeline::~InferPipeline() { close(); }
 
 void InferPipeline::close() {
-  // Releasing vdevice releases all child resources.
+  // Release in reverse dependency order, mirroring Python close():
+  // configured_infer_model -> infer_model/network_group -> vdevice.
+  configured_infer_model_.reset();
+  infer_model_.reset();
+  network_group_.reset();
   vdevice_.reset();
 }
 
@@ -175,7 +179,7 @@ void InferPipeline::infer_async(const std::vector<cv::Mat> &inputs) {
     throw std::invalid_argument("Input count mismatch");
 
   // Create new bindings for this invocation
-  auto bind_exp = configured_infer_model_.create_bindings();
+  auto bind_exp = configured_infer_model_->create_bindings();
   if (!bind_exp)
     throw InferenceSubmitError("Failed to create bindings: " + std::to_string(bind_exp.status()));
   bindings_ = bind_exp.release();
@@ -231,7 +235,7 @@ void InferPipeline::infer_async(const std::vector<cv::Mat> &inputs) {
 
   // ---- Wait for device ready ----
   auto ready_status =
-      configured_infer_model_.wait_for_async_ready(std::chrono::milliseconds(TIMEOUT_MS));
+      configured_infer_model_->wait_for_async_ready(std::chrono::milliseconds(TIMEOUT_MS));
   if (is_hailo_error(ready_status)) {
     if (is_hailo_timeout(ready_status))
       throw InferenceTimeoutError("Inference device not ready: timeout after " +
@@ -254,9 +258,9 @@ void InferPipeline::infer_async(const std::vector<cv::Mat> &inputs) {
           callback_results_ = collect_output_from_bindings();
         }
       };
-      return configured_infer_model_.run_async({bindings_}, cb);
+      return configured_infer_model_->run_async({bindings_}, cb);
     } else {
-      return configured_infer_model_.run_async({bindings_});
+      return configured_infer_model_->run_async({bindings_});
     }
   }();
 

@@ -2,6 +2,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -64,7 +65,7 @@ private:
   // Async mode
   std::unique_ptr<hailort::VDevice> vdevice_;
   std::shared_ptr<hailort::InferModel> infer_model_;
-  hailort::ConfiguredInferModel configured_infer_model_;
+  std::optional<hailort::ConfiguredInferModel> configured_infer_model_;
   hailort::ConfiguredInferModel::Bindings bindings_;
   hailort::AsyncInferJob async_job_;
   bool has_job_ = false;
