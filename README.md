@@ -597,6 +597,21 @@ Frame Reading      →     Preprocessing       →     Frame Display
 - The palm detection model used in this project is from Google MediaPipe: [MediaPipe Models](https://github.com/google-ai-edge/mediapipe/blob/master/docs/solutions/models.md)
 - The post-processing code for the MediaPipe model is adapted from [blaze_app_python](https://github.com/AlbertaBeef/blaze_app_python/tree/main)
 
+## C++ Port
+
+A C++ port of this pipeline is available under the [`cpp/`](./cpp/) directory. It provides an equivalent command-line interface and feature set, compiled with CMake.
+
+See **[cpp/README.md](./cpp/README.md)** for build instructions, requirements, and usage details.
+
+| Feature                         | Python | C++  |
+| ------------------------------- | ------ | ---- |
+| Synchronous inference           | Yes    | Yes  |
+| Asynchronous inference          | Yes    | Yes  |
+| Callback mode                   | Yes    | Yes  |
+| Performance profiling (console) | Yes    | Yes  |
+| Perfetto trace export           | Yes    | Yes  |
+| Matplotlib charts               | Yes    | No   |
+
 ## Additional Documentation
 
 For more detailed information about specific features:
@@ -658,9 +673,17 @@ This software is licensed under the Apache License 2.0 - see the LICENSE file fo
 
 ---
 
-**Version**: 1.4.0  
-**Last Updated**: 2026-02-12  
+**Version**: 1.5.0
+**Last Updated**: 2026-02-19
 **Hailo SDK Compatibility**: 4.0+
+
+**What's New in 1.5.0:**
+
+- C++ port of the inference pipeline under `cpp/` directory
+- Equivalent command-line interface and feature set in C++
+- CMake build system with CLI11 and nlohmann_json dependencies
+- Synchronous, asynchronous, and callback inference modes in C++
+- Performance profiling with console output and Perfetto trace export in C++
 
 **What's New in 1.4.0:**
 
