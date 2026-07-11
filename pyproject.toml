@@ -1,0 +1,47 @@
+[project]
+name = "hailo-inference-pipeline"
+version = "1.5.1"
+description = "A comprehensive Python implementation for deploying deep learning models on Hailo hardware accelerators."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    # hailo_platform (the Hailo SDK) is intentionally not listed here -
+    # install it manually from the vendor-provided wheel for your HailoRT
+    # version; see README.md "Installation".
+    "numpy",
+    "opencv-python==3.4.18.65",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=8.0",
+    "pytest-cov>=7.0",
+    "pytest-mock>=3.10",
+    "pytest-xdist>=3.0",
+    "hypothesis>=6.0",
+    "coverage>=7.14",
+    "diff-cover>=9.0",
+
+    # Type checking
+    "mypy>=1.10",
+
+    # Lint / formatting
+    "ruff>=0.4",
+
+    # Static analysis (complexity, dead code, dependency hygiene)
+    "radon>=6.0",
+    "vulture>=2.10",
+    "deptry>=0.20",
+
+    # Profiling
+    "scalene>=1.5",
+    "py-spy>=0.4",
+]
+
+[tool.uv]
+# This project is a collection of scripts run directly (`python inference.py`),
+# not an installable/importable package - don't try to build a wheel for it.
+package = false

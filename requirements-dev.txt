@@ -1,0 +1,29 @@
+# Development and testing dependencies (full dev toolset).
+# Installable via pip (`pip install -r requirements-dev.txt`) or uv
+# (`uv sync --extra dev` / `uv run --extra dev <tool>`); kept in sync with the
+# `dev` optional-dependencies in pyproject.toml.
+-r requirements.txt
+
+# Testing
+pytest>=8.0
+pytest-cov>=7.0
+pytest-mock>=3.10
+pytest-xdist>=3.0
+hypothesis>=6.0
+coverage>=7.14
+diff-cover>=9.0
+
+# Type checking
+mypy>=1.10
+
+# Lint / formatting
+ruff>=0.4
+
+# Static analysis (complexity, dead code, dependency hygiene)
+radon>=6.0
+vulture>=2.10
+deptry>=0.20
+
+# Profiling
+scalene>=1.5
+py-spy>=0.4

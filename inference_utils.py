@@ -6,7 +6,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import cv2
 import matplotlib.pyplot as plt
@@ -198,12 +198,16 @@ class FrameReaderThread:
             read_end = time.time()
 
             if not ret:
-                # Signal end of video
+                # cv2.VideoCapture.read() returning False means either normal
+                # end of stream or a genuine read error - it doesn't reliably
+                # distinguish the two. Set read_error before queuing the
+                # sentinel so a consumer that dequeues it right away already
+                # observes the correct flag.
+                self.read_error = True
                 try:
                     self.frame_queue.put(None, timeout=1.0)
                 except queue.Full:
                     pass
-                self.read_error = not ret
                 break
 
             try:
@@ -243,7 +247,15 @@ class FrameReaderThread:
             return None
 
     def has_error(self) -> bool:
-        """Check if a read error occurred."""
+        """
+        Check whether the reader thread has stopped reading.
+
+        True once cv2.VideoCapture.read() returns False (end of stream or a
+        genuine read error - OpenCV doesn't reliably distinguish the two).
+        A caller that just received None from get_frame() can use this to
+        tell "the reader thread has definitively stopped" from "the queue
+        was merely empty for one timeout period, try again".
+        """
         return self.read_error
 
     def collect_timing_data(self) -> None:
@@ -567,6 +579,48 @@ class PerformanceProfiler:
         print("Close the chart window to continue.")
         plt.show()
 
+    def _build_thread_events(
+        self,
+        checkpoint_names: List[str],
+        frame_idx: int,
+        frame_start_us: int,
+        process_id: int,
+        tid: int,
+        category: str,
+        prefix_to_strip: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Build the 'complete' (ph=X) trace events for one thread's checkpoints in one frame."""
+        events: List[Dict[str, Any]] = []
+        checkpoint_start_us = frame_start_us
+
+        for checkpoint_name in checkpoint_names:
+            if frame_idx < len(self.checkpoints[checkpoint_name]):
+                duration_s = self.checkpoints[checkpoint_name][frame_idx]
+                duration_us = int(duration_s * 1_000_000)
+
+                display_name = (
+                    checkpoint_name.replace(prefix_to_strip, "")
+                    if prefix_to_strip
+                    else checkpoint_name
+                )
+
+                events.append(
+                    {
+                        "name": display_name,
+                        "cat": category,
+                        "ph": "X",  # Complete event (duration)
+                        "ts": checkpoint_start_us,
+                        "dur": duration_us,
+                        "pid": process_id,
+                        "tid": tid,
+                        "args": {"frame": frame_idx + 1},
+                    }
+                )
+
+                checkpoint_start_us += duration_us
+
+        return events
+
     def export_perfetto_trace(self, output_path: str = "trace.json") -> None:
         """
         Export profiling data to Perfetto/Chrome trace event format.
@@ -658,81 +712,42 @@ class PerformanceProfiler:
                 }
             )
 
-            # Add main thread events
-            checkpoint_start_us = frame_start_us
-            for checkpoint_name in main_thread_checkpoints:
-                if frame_idx < len(self.checkpoints[checkpoint_name]):
-                    duration_s = self.checkpoints[checkpoint_name][frame_idx]
-                    duration_us = int(duration_s * 1_000_000)
-
-                    trace_events.append(
-                        {
-                            "name": checkpoint_name,
-                            "cat": "pipeline",
-                            "ph": "X",  # Complete event (duration)
-                            "ts": checkpoint_start_us,
-                            "dur": duration_us,
-                            "pid": process_id,
-                            "tid": main_thread_id,
-                            "args": {"frame": frame_idx + 1},
-                        }
-                    )
-
-                    checkpoint_start_us += duration_us
-
-            # Add capture thread events (if any)
-            # Capture thread events start at the same time as the frame
-            # but on a different thread ID
-            capture_start_us = frame_start_us
-            for checkpoint_name in capture_thread_checkpoints:
-                if frame_idx < len(self.checkpoints[checkpoint_name]):
-                    duration_s = self.checkpoints[checkpoint_name][frame_idx]
-                    duration_us = int(duration_s * 1_000_000)
-
-                    # Remove "capture_" prefix for cleaner display
-                    capture_name = checkpoint_name.replace("capture_", "")
-
-                    trace_events.append(
-                        {
-                            "name": capture_name,
-                            "cat": "capture",
-                            "ph": "X",  # Complete event (duration)
-                            "ts": capture_start_us,
-                            "dur": duration_us,
-                            "pid": process_id,
-                            "tid": capture_thread_id,
-                            "args": {"frame": frame_idx + 1},
-                        }
-                    )
-
-                    capture_start_us += duration_us
-
-            # Add display thread events (if any)
-            # Display thread events start at the same time as the frame
-            # but on a different thread ID
-            display_start_us = frame_start_us
-            for checkpoint_name in display_thread_checkpoints:
-                if frame_idx < len(self.checkpoints[checkpoint_name]):
-                    duration_s = self.checkpoints[checkpoint_name][frame_idx]
-                    duration_us = int(duration_s * 1_000_000)
-
-                    # Remove "display_" prefix for cleaner display
-                    display_name = checkpoint_name.replace("display_", "")
-
-                    trace_events.append(
-                        {
-                            "name": display_name,
-                            "cat": "display",
-                            "ph": "X",  # Complete event (duration)
-                            "ts": display_start_us,
-                            "dur": duration_us,
-                            "pid": process_id,
-                            "tid": display_thread_id,
-                            "args": {"frame": frame_idx + 1},
-                        }
-                    )
-
-                    display_start_us += duration_us
+            # Add main/capture/display thread events. Capture and display
+            # events start at the same timestamp as the frame boundary but on
+            # their own thread IDs, with their checkpoint-name prefix stripped
+            # for cleaner display.
+            trace_events.extend(
+                self._build_thread_events(
+                    main_thread_checkpoints,
+                    frame_idx,
+                    frame_start_us,
+                    process_id,
+                    main_thread_id,
+                    "pipeline",
+                )
+            )
+            trace_events.extend(
+                self._build_thread_events(
+                    capture_thread_checkpoints,
+                    frame_idx,
+                    frame_start_us,
+                    process_id,
+                    capture_thread_id,
+                    "capture",
+                    prefix_to_strip="capture_",
+                )
+            )
+            trace_events.extend(
+                self._build_thread_events(
+                    display_thread_checkpoints,
+                    frame_idx,
+                    frame_start_us,
+                    process_id,
+                    display_thread_id,
+                    "display",
+                    prefix_to_strip="display_",
+                )
+            )
 
         # Add metadata
         trace_events.append(
@@ -744,37 +759,22 @@ class PerformanceProfiler:
             }
         )
 
-        trace_events.append(
-            {
-                "name": "thread_name",
-                "ph": "M",
-                "pid": process_id,
-                "tid": main_thread_id,
-                "args": {"name": "Main Thread"},
-            }
-        )
-
-        # Add capture thread metadata if there are capture events
+        # Main thread metadata is always emitted; capture/display metadata
+        # only if that thread actually produced checkpoints.
+        thread_names = [(main_thread_id, "Main Thread")]
         if capture_thread_checkpoints:
-            trace_events.append(
-                {
-                    "name": "thread_name",
-                    "ph": "M",
-                    "pid": process_id,
-                    "tid": capture_thread_id,
-                    "args": {"name": "Capture Thread"},
-                }
-            )
-
-        # Add display thread metadata if there are display events
+            thread_names.append((capture_thread_id, "Capture Thread"))
         if display_thread_checkpoints:
+            thread_names.append((display_thread_id, "Display Thread"))
+
+        for tid, name in thread_names:
             trace_events.append(
                 {
                     "name": "thread_name",
                     "ph": "M",
                     "pid": process_id,
-                    "tid": display_thread_id,
-                    "args": {"name": "Display Thread"},
+                    "tid": tid,
+                    "args": {"name": name},
                 }
             )
 
@@ -785,12 +785,7 @@ class PerformanceProfiler:
         with open(output_path, "w") as f:
             json.dump(trace_data, f, indent=2)
 
-        # Build thread list for output
-        thread_list = ["Main Thread"]
-        if capture_thread_checkpoints:
-            thread_list.append("Capture Thread")
-        if display_thread_checkpoints:
-            thread_list.append("Display Thread")
+        thread_list = [name for _, name in thread_names]
 
         print(f"\nPerfetto trace exported to: {output_path}")
         print(f"Total frames: {num_frames}")

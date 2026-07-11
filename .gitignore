@@ -1,7 +1,10 @@
 .python-version
 .clang-format
+.claude
+.serena
 CLAUDE.md
 *.log
+logs/*
 hefs/*.hef
 notebook/*.dot
 notebook/*.har

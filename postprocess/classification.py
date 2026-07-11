@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import cv2
 import numpy as np
@@ -11,7 +11,7 @@ class ImagePostprocessorClassification:
 
     Attributes:
         top_n (int): Number of top predictions to consider for each output.
-        labels (Optional[Dict[str, str]]): Mapping of label indices to label names loaded from a JSON file.
+        labels (Dict[str, str]): Mapping of label indices to label names loaded from a JSON file.
     """
 
     def __init__(
@@ -33,11 +33,10 @@ class ImagePostprocessorClassification:
             ValueError: If there is an error decoding the JSON file.
         """
         self.top_n = top_n
-        self.labels: Optional[Dict[str, str]] = None
 
         try:
             with open(configs, "r") as f:
-                self.labels = json.load(f)
+                self.labels: Dict[str, str] = json.load(f)
         except FileNotFoundError:
             raise FileNotFoundError(
                 f"Label file not found at path: {configs}. Please provide the correct path."

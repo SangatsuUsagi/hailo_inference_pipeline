@@ -6,37 +6,17 @@
 
 ![](./images/out_yolov11.png)![](./images/out_yolov11.gif)
 
-A comprehensive Python implementation for deploying deep learning models on Hailo hardware accelerators with support for both synchronous and asynchronous inference operations.
+A Python pipeline for running deep learning inference on Hailo AI accelerators, with synchronous and asynchronous inference modes, multi-threaded video capture/display, and built-in performance profiling.
 
-## Overview
-
-This inference pipeline provides a robust and production-ready framework for running neural network inference on Hailo AI accelerators. It features sophisticated error handling, performance profiling, and support for various post-processing operations including object detection and image classification.
-
-The pipeline is designed to handle both single images and video streams with real-time processing capabilities, making it suitable for production deployment scenarios.
+It handles both single images and video streams, and ships with three post-processing pipelines: image classification (Top-N with ImageNet-style labels), YOLOv8-style object detection (NMS on host), and MediaPipe-style palm detection.
 
 ## Features
 
-### Core Capabilities
-
-- **Dual Inference Modes**: Support for both synchronous and asynchronous inference
-- **Robust Exception Handling**: Hailo-specific exception handling with proper error recovery
-- **Performance Profiling**: Built-in profiling with detailed timing statistics and visualization
-- **Multi-threaded Display**: Asynchronous frame display for smooth video playback
-- **Context Manager Support**: Safe resource management with automatic cleanup
-
-### Supported Post-Processing
-
-- **Image Classification**: Top-N classification results with ImageNet labels
-- **Object Detection**: YOLOv8-style detection with NMS on host
-- **Palm Detection**: Specialized hand/palm detection with custom anchors
-
-### Performance Features
-
-- **Zero-Copy Operations**: Efficient buffer management to minimize memory overhead
-- **Pipeline Visualization**: Stacked timing charts and detailed performance breakdowns
-- **Multi-Thread Profiling**: Separate thread visualization in Perfetto traces (Main + Display threads)
-- **Perfetto Trace Export**: Industry-standard trace format for advanced performance analysis
-- **Hardware Scheduling**: Configurable scheduling algorithms (Round Robin)
+- **Inference modes**: synchronous and asynchronous (default), plus an optional callback mode for the async path
+- **Hailo-specific exception handling**: dedicated exception types per failure mode, each with a defined recovery action (see [Exception Handling](#exception-handling))
+- **Performance profiling**: per-stage timing statistics, matplotlib charts, and Perfetto trace export across up to three threads (main, capture, display)
+- **Multi-threaded video I/O**: frame capture and display run on separate threads from inference, for higher throughput on video streams
+- **Context manager support**: `InferPipeline` handles Hailo device setup/teardown automatically
 
 ## Requirements
 
@@ -45,41 +25,32 @@ The pipeline is designed to handle both single images and video streams with rea
 - Hailo AI accelerator (Hailo-8, Hailo-8L, or compatible device)
 - PCIe interface connection
 
-### Software Dependencies
+### Software
 
-```bash
-# Hailo SDK
-hailo-platform>=4.0.0
-
-# Core dependencies
-opencv-python
-matplotlib
-
-# Additional utilities (included in repository)
-- inference_utils (DisplayThread, FrameReaderThread, PerformanceProfiler)
-- postprocess modules (classification, nms_on_host, palm_detection)
-```
-
-### Python Version
-
-- Python 3.8 or higher
+- Python 3.10 or higher
+- HailoRT and the `hailo_platform` Python package - installed manually from the Hailo-provided wheel for your HailoRT version (not available on PyPI)
+- `numpy`, `opencv-python` (pinned to `3.4.18.65`), `matplotlib` - see `requirements.txt` / `pyproject.toml`
 
 ## Installation
 
-1. Install HailoRT following the official documentation
-2. Install Python dependencies:
+1. Install HailoRT and the `hailo_platform` wheel following the official Hailo documentation.
+2. Install the remaining Python dependencies:
 
 ```bash
-# It is recommended to use an OpenCV 3.x version that matches the numpy version required by HailoRT.
-# For example:
-pip install opencv-python==3.4.18.65 matplotlib
+pip install -r requirements.txt
+# or, with uv:
+uv sync
 ```
 
-3. Ensure the Hailo device is properly connected and recognized:
+   `numpy`'s version must be compatible with your installed HailoRT build, which is why `opencv-python` is pinned to the OpenCV 3.x line (`3.4.18.65`) - it's the last major version built against the older numpy versions HailoRT expects. If `import hailo_platform` fails with a numpy-related error after this step, check the numpy version HailoRT was built against and pin `numpy` to match.
+
+3. Confirm the Hailo device is connected and recognized:
 
 ```bash
 hailortcli fw-control identify
 ```
+
+4. Get a `.hef` model file for your target model. This repository doesn't ship any (`hefs/` is empty by default) - convert your own model with the Hailo Dataflow Compiler, or see [About Jupyter Notebooks](#about-jupyter-notebooks) for building one from a MediaPipe TFLite palm-detection model.
 
 ## Usage
 
@@ -146,20 +117,30 @@ python inference.py image.jpg \
 
 ### Configuration Files
 
-The pipeline uses JSON configuration files for post-processing:
+The pipeline uses JSON configuration files for post-processing, and each post-processor expects a different structure:
 
-- **Classification**: `./configs/class_names_imagenet.json`
-- **YOLOv8 Detection**: `./configs/yolov8.json`
-- **Palm Detection**: `./configs/palm_detection_full.json`
+- **Classification**: `./configs/class_names_imagenet.json` - a flat `{"<class_id>": "<label>"}` map
+- **YOLOv8 Detection**: `./configs/yolov8.json` - preprocessing params plus a class-id/label map
+- **Palm Detection**: `./configs/palm_detection_full.json` - MediaPipe anchor-generation and decoding parameters
 
-Example configuration structure:
+For example, `yolov8.json` looks like this (trimmed):
 
 ```json
-{
-    "classes": ["class1", "class2", ...],
-    "confidence_threshold": 0.5,
-    "nms_threshold": 0.45
-}
+[
+  {
+    "preprocessing": {
+      "network_type": "detection",
+      "input_shape": [640, 640, 3]
+    }
+  },
+  {
+    "0": "Person",
+    "1": "Bicycle",
+    "2": "Car",
+    "...": "...",
+    "79": "Toothbrush"
+  }
+]
 ```
 
 ## Synchronous vs Asynchronous Inference
@@ -214,16 +195,6 @@ Frame 3 → Preprocess → Submit Inference ──────┐     │
                                               │
                                 Postprocess Frame 2 & Wait Frame 3 inference
 ```
-
-### Performance Comparison
-
-| Metric                    | Synchronous | Asynchronous |
-| ------------------------- | ----------- | ------------ |
-| Single Image Latency      | Low         | Medium       |
-| Video Throughput (FPS)    | Medium      | High         |
-| CPU Utilization           | Lower       | Higher       |
-| Implementation Complexity | Simple      | Complex      |
-| Resource Usage            | Lower       | Higher       |
 
 ### Example performance measurements
 
@@ -356,23 +327,7 @@ The trace shows events across **up to three separate thread rows** (depending on
 - `display`: OpenCV rendering time (`cv2.imshow`)
 - `key_check`: Keyboard input polling time
 
-This separation allows you to:
-
-- **See true parallelism**: Visualize when all threads run concurrently
-- **Identify I/O bottlenecks**: Determine if video reading is slow (capture thread)
-- **Find processing bottlenecks**: Determine if main thread or display thread is limiting performance
-- **Analyze queue behavior**: See if threads are starved or if frames are backing up
-- **Understand complete pipeline**: End-to-end visibility of capture → process → display
-
-**Benefits of Perfetto Trace:**
-
-- **Timeline Visualization**: See exact execution timeline of each pipeline stage across both threads
-- **Frame Boundaries**: Visual markers showing where each frame starts
-- **Duration Events**: Color-coded bars showing how long each stage took
-- **Zoom & Pan**: Interactive exploration of timing data
-- **Performance Analysis**: Identify bottlenecks and timing patterns across threads
-- **Professional Format**: Industry-standard trace format used by Chrome, Android, and more
-- **Thread Insights**: Understand parallelism, blocking, and synchronization
+This separation lets you see true parallelism across threads, spot I/O bottlenecks (slow capture-thread reads), find processing bottlenecks (main or display thread lagging), and check whether threads are starved or backing up on their queues.
 
 **What You'll See:**
 
@@ -406,24 +361,11 @@ This separation allows you to:
 └─────────────────────────────────────────────────────┘
 ```
 
-- Each checkpoint appears as a duration bar on the timeline
-- Frame markers indicate processing boundaries
-- Sequential execution flow is visually clear across threads
-- Easy to spot timing variations and bottlenecks
-- Metadata includes frame numbers and stage names
-
-**Typical Analysis Use Cases:**
-
-1. **Bottleneck Identification**: See which stage takes longest on which thread
-2. **I/O Performance**: Check if video capture (Capture Thread) is slow
-3. **Parallelism Validation**: Verify all threads run while others process
-4. **Queue Health**: Check if threads wait too long (starved) or run constantly (bottleneck)
-5. **Frame Variance**: Compare timing across frames to spot anomalies
-6. **End-to-End Latency**: Measure complete frame processing time from capture to display
+Each checkpoint appears as a duration bar on the timeline, with frame markers separating each frame's events - useful for spotting timing variance and bottlenecks across frames and threads.
 
 ## Exception Handling
 
-The pipeline implements robust exception handling for production environments:
+The pipeline defines Hailo-specific exception types, each with a suggested recovery action (see [Limitations](#limitations) for a caveat on this):
 
 ### Exception Types
 
@@ -510,7 +452,7 @@ Overall throughput: 24.31 FPS
 
 - Use asynchronous mode (default)
 - Disable profiling for production
-- Increase `max_queue_size` in DisplayThread
+- Increase `max_queue_size` for `DisplayThread`/`FrameReaderThread` (hardcoded in `inference.py`, not a CLI flag - requires editing the source)
 - Use hardware-accelerated video decoding
 
 ### Debug Mode
@@ -572,7 +514,7 @@ Frame Reading      →     Preprocessing       →     Frame Display
 - **`InferPipeline`**: Main inference manager
   - Handles device initialization
   - Manages synchronous/asynchronous inference
-  - Implements robust exception handling
+  - Implements Hailo-specific exception handling
 
 - **`FrameReaderThread`**: Asynchronous frame capture (video mode)
   - Non-blocking video frame reading
@@ -649,14 +591,12 @@ To use the notebook:
 2. Follow the step-by-step instructions of DFC notebook to convert your TFLite model to HEF format
 3. Use the generated HEF file with the main inference script
 
-## Known issues
+## Limitations
 
-Exception handling has not been validated.
+- Exception handling has not been validated against real hardware failures.
+- Some Hailo devices don't support the synchronous inference API (`--synchronous`) - Hailo-10 is one example. On those devices, use the default asynchronous mode instead.
 
-## Device-specific limitations
-
-Some Hailo devices do not support synchronous inference API (`--synchronous`), for example, Hailo-10.  
-On such devices, use the default asynchronous inference mode instead.
+Found a bug or have a question? Open an issue on this repository's GitHub Issues page.
 
 ## License
 
@@ -673,9 +613,22 @@ This software is licensed under the Apache License 2.0 - see the LICENSE file fo
 
 ---
 
-**Version**: 1.5.0
-**Last Updated**: 2026-02-19
+**Version**: 1.5.1
+**Last Updated**: 2026-07-11
 **Hailo SDK Compatibility**: 4.0+
+
+**What's New in 1.5.1:**
+
+- Refactoring pass across `inference.py`/`inference_utils.py`/`postprocess/`:
+  - Replaced `Optional[Any]` typing on Hailo SDK handles in `InferPipeline` with minimal `Protocol` types, resolving 19 `mypy --strict` errors
+  - Split the 313-line `main()` function (cyclomatic complexity F) into 7 focused helper functions
+  - Deduplicated repeated Hailo exception classification logic across `infer_async`/`wait_and_get_output`/`infer_pipeline` into a single helper
+  - Formalized the postprocessor interface via `typing.Protocol` instead of a hand-maintained `Union`
+  - Deduplicated the three near-identical event-building loops in `PerformanceProfiler.export_perfetto_trace`
+- Bug fixes surfaced during the refactor:
+  - Fixed a type mismatch in NMS postprocessing where `ImagePostprocessorNmsOnHost.postprocess` was declared against the wrong output shape
+  - Fixed `FrameReaderThread`: a momentary read stall no longer terminates the entire video pipeline (previously any single frame-queue timeout was treated as end of stream)
+- Added `pyproject.toml` for centralized dependency and dev-tooling metadata; `numpy` is now an explicit dependency in `requirements.txt`
 
 **What's New in 1.5.0:**
 

@@ -1,0 +1,22 @@
+# Runtime dependencies for the Hailo Inference Pipeline
+# Python 3.10 or higher required
+#
+# Kept in sync with the base dependencies in pyproject.toml; install via
+# `pip install -r requirements.txt` or `uv sync`.
+#
+# hailo_platform (the Hailo SDK) is intentionally not listed here - install
+# it manually from the vendor-provided wheel for your HailoRT version; see
+# README.md "Installation".
+#
+# numpy is listed explicitly, not left to opencv-python/matplotlib's
+# transitive resolution, because its version must be compatible with your
+# installed HailoRT build - see README.md "Installation" for guidance on
+# picking a compatible opencv-python/numpy combination.
+#
+# opencv-python is pinned to the latest OpenCV 3.x release (3.4.18.65), the
+# major version whose numpy requirement matches HailoRT's - see README.md
+# "Installation".
+
+numpy
+opencv-python==3.4.18.65
+matplotlib

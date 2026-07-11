@@ -64,9 +64,22 @@ else:
         profiler.checkpoint("1_frame_read")
         # Collect timing data from capture thread
         frame_reader_thread.collect_timing_data()
-    
+
     if frame is None:
-        break
+        if frame_reader_thread.has_error():
+            # Reader thread has genuinely stopped (end of stream or a
+            # read error - cv2.VideoCapture can't reliably tell the two apart)
+            break
+        # Otherwise get_frame() just timed out waiting on an empty queue;
+        # the reader thread is presumably still running, so retry instead
+        # of treating a transient stall as end of stream. Bounded so an
+        # unresponsive reader thread still can't hang the loop forever.
+        consecutive_empty_reads += 1
+        if consecutive_empty_reads >= MAX_CONSECUTIVE_EMPTY_READS:
+            break
+        continue
+
+    consecutive_empty_reads = 0
     ret = True
 ```
 
@@ -168,18 +181,44 @@ frame_reader_thread = FrameReaderThread(
 
 ## Error Handling
 
-### End of Video
+`get_frame()` returns `None` in two different situations, and the main loop
+distinguishes between them via `has_error()` before deciding whether to stop:
+
+### The Reader Thread Has Genuinely Stopped
+Once `cv2.VideoCapture.read()` returns `False` - either normal end of video
+or a genuine read error (OpenCV doesn't reliably distinguish the two) - the
+reader thread sets an internal `read_error` flag *before* queuing a `None`
+sentinel, then exits its loop. A caller that receives this `None` can check
+`has_error()` to confirm the thread has actually stopped:
+
 ```python
 frame = frame_reader_thread.get_frame()
 if frame is None:
-    break  # Video ended
+    if frame_reader_thread.has_error():
+        break  # Reader thread stopped: end of video or a read error
 ```
 
-### Read Errors
+### A Transient Empty-Queue Timeout
+`get_frame()` also returns `None` if its 1-second `queue.get()` call times
+out - which can happen even while the reader thread is alive and running
+(e.g. a momentary I/O stall). Treating this identically to "the reader
+stopped" would silently end the whole pipeline on a single slow read, so the
+main loop retries instead, up to `MAX_CONSECUTIVE_EMPTY_READS` (30, ~30s at
+the default 1.0s timeout) consecutive empty reads:
+
 ```python
-if frame_reader_thread.has_error():
-    print("Error reading video frames")
+if frame is None:
+    if frame_reader_thread.has_error():
+        break
+    consecutive_empty_reads += 1
+    if consecutive_empty_reads >= MAX_CONSECUTIVE_EMPTY_READS:
+        break  # Reader thread appears unresponsive
+    continue
 ```
+
+The retry counter resets to `0` every time a real frame is received, so it
+only trips on *consecutive* empty reads, not on occasional ones scattered
+across a long-running stream.
 
 ## Thread Safety
 
@@ -292,6 +331,14 @@ Stopping display thread...
 ### Issue: Choppy video playback
 **Cause**: Display thread can't keep up
 **Solution**: Check display thread timing in Perfetto trace
+
+### Issue: Pipeline stops after a brief camera/stream hiccup
+**Cause**: Before the retry logic described in [Error Handling](#error-handling)
+was added, any `get_frame()` timeout (even a transient one, with the reader
+thread still alive) was treated as end of stream and broke the main loop.
+**Solution**: Already fixed - the main loop now checks `has_error()` and only
+stops on a genuine reader-thread stop, retrying (bounded to
+`MAX_CONSECUTIVE_EMPTY_READS`) on transient empty-queue timeouts.
 
 ## Future Enhancements
 

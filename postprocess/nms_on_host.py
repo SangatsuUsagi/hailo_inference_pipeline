@@ -242,7 +242,7 @@ class ImagePostprocessorNmsOnHost:
         return frame
 
     def postprocess(
-        self, frame: np.ndarray, outputs: Dict[str, np.ndarray]
+        self, frame: np.ndarray, outputs: Dict[str, List[np.ndarray]]
     ) -> np.ndarray:
         """
         Post-process model outputs and visualize detections on the frame.
@@ -250,9 +250,14 @@ class ImagePostprocessorNmsOnHost:
         This is the main entry point for post-processing object detection results.
         It applies visualization if detections are present in the outputs.
 
+        This postprocessor is only used for models with on-device NMS
+        (FormatOrder.HAILO_NMS_BY_CLASS), where each output value is a list
+        of per-class detection arrays rather than a flat ndarray.
+
         Args:
             frame (np.ndarray): The input image frame to process.
-            outputs (Dict[str, np.ndarray]): Model output tensors.
+            outputs (Dict[str, List[np.ndarray]]): Model output tensors, one
+                list of per-class detection arrays per output layer.
 
         Returns:
             np.ndarray: The processed frame with detections drawn on it.
