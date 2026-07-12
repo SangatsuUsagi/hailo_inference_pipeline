@@ -7,7 +7,20 @@ import argparse
 import time
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, NoReturn, Optional, Protocol, Tuple, Union
+from types import TracebackType
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    NoReturn,
+    Optional,
+    Protocol,
+    Tuple,
+    Type,
+    Union,
+)
 
 import cv2
 import numpy as np
@@ -16,6 +29,7 @@ from hailo_platform import (
     ConfigureParams,
     FormatOrder,
     FormatType,
+    HailoRTException,
     HailoSchedulingAlgorithm,
     HailoStreamInterface,
     InferVStreams,
@@ -23,6 +37,11 @@ from hailo_platform import (
     OutputVStreamParams,
     VDevice,
 )
+
+# HailoRTTimeout isn't re-exported from the top-level hailo_platform package
+# (only HailoRTException is - see hailo_platform/__init__.py's __all__), so it
+# must be imported from its defining submodule directly.
+from hailo_platform.pyhailort.pyhailort import HailoRTTimeout
 
 from inference_utils import DisplayThread, FrameReaderThread, PerformanceProfiler
 from postprocess.classification import ImagePostprocessorClassification
@@ -80,16 +99,9 @@ def is_hailo_timeout_exception(e: Exception) -> bool:
         e: Exception to check
 
     Returns:
-        True if exception is HailoRTTimeout
+        True if exception is a HailoRTTimeout
     """
-    exception_type = type(e).__name__
-    exception_str = str(e).lower()
-    return (
-        exception_type == "HailoRTTimeout"
-        or "timeout" in exception_type.lower()
-        or "timeout" in exception_str
-        or "timed out" in exception_str
-    )
+    return isinstance(e, HailoRTTimeout)
 
 
 def is_hailo_exception(e: Exception) -> bool:
@@ -100,15 +112,9 @@ def is_hailo_exception(e: Exception) -> bool:
         e: Exception to check
 
     Returns:
-        True if exception is HailoRTException or derived type
+        True if exception is a HailoRTException or derived type
     """
-    exception_type = type(e).__name__
-    return (
-        exception_type.startswith("HailoRT")
-        or "hailo" in exception_type.lower()
-        or hasattr(e, "__module__")
-        and "hailo" in str(getattr(e, "__module__", "")).lower()
-    )
+    return isinstance(e, HailoRTException)
 
 
 def _raise_as(
@@ -256,10 +262,15 @@ class InferPipeline:
     post-processing capabilities for classification and detection tasks.
     """
 
-    def __enter__(self):
+    def __enter__(self) -> "InferPipeline":
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> Literal[False]:
         self.close()
         return False
 
@@ -1011,20 +1022,46 @@ def _open_video_source(
 
 
 def _build_postprocessor(
-    args: argparse.Namespace, params: Tuple[Tuple[float, float], Tuple[int, int]]
+    args: argparse.Namespace,
+    params: Tuple[Tuple[float, float], Tuple[int, int]],
+    is_nms: bool,
 ) -> Postprocessor:
-    """Construct the postprocessor selected by --postprocess, applying its default config path."""
+    """Construct the postprocessor selected by --postprocess, applying its default config path.
+
+    Validates --postprocess against is_nms (whether the loaded HEF's output
+    format is HAILO_NMS_BY_CLASS): nms_on_host expects a List[np.ndarray]-
+    per-class output shape, while classification/palm_detection expect a flat
+    np.ndarray. Nothing else ties the CLI flag to the HEF's actual output
+    format, so without this check a mismatch would only surface as an opaque
+    error deep inside postprocess().
+    """
     configs: Optional[str] = args.config
 
     if args.postprocess == "nms_on_host":
+        if not is_nms:
+            raise ValueError(
+                "--postprocess nms_on_host requires a HEF compiled with "
+                "on-device NMS (HAILO_NMS_BY_CLASS output format), but the "
+                "loaded HEF does not have one."
+            )
         if configs is None:
             configs = "./configs/yolov8.json"
         return ImagePostprocessorNmsOnHost(params, configs)
     elif args.postprocess == "palm_detection":
+        if is_nms:
+            raise ValueError(
+                "--postprocess palm_detection expects flat per-layer output, "
+                "but the loaded HEF has on-device NMS output enabled."
+            )
         if configs is None:
             configs = "./configs/palm_detection_full.json"
         return ImagePostprocessorPalmDetection(params, configs)
     elif args.postprocess == "classification":
+        if is_nms:
+            raise ValueError(
+                "--postprocess classification expects flat per-layer output, "
+                "but the loaded HEF has on-device NMS output enabled."
+            )
         if configs is None:
             configs = "./configs/class_names_imagenet.json"
         return ImagePostprocessorClassification(params, configs, top_n=3)
@@ -1312,7 +1349,7 @@ def main() -> None:
     try:
         infer, input_shape = _load_model_and_pipeline(args, is_async, is_callback)
         cap, is_image, params = _open_video_source(args, input_shape)
-        postprocess = _build_postprocessor(args, params)
+        postprocess = _build_postprocessor(args, params, infer.is_nms)
         frame_reader_thread, display_thread = _start_worker_threads(
             cap, is_image, profiler, profiling_enabled
         )

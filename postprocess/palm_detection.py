@@ -6,11 +6,94 @@ including visualization of detection results and region of interest (ROI) extrac
 """
 
 import json
+from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
+
+
+@dataclass(frozen=True)
+class AnchorOptions:
+    """Anchor-generation parameters read from a palm detection config file's model_info[0]."""
+
+    num_layers: int
+    min_scale: float
+    max_scale: float
+    input_size_height: int
+    input_size_width: int
+    anchor_offset_x: float
+    anchor_offset_y: float
+    strides: List[int]
+    aspect_ratios: List[float]
+    reduce_boxes_in_lowest_layer: bool
+    interpolated_scale_aspect_ratio: float
+    fixed_anchor_size: bool
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AnchorOptions":
+        try:
+            return cls(
+                num_layers=data["num_layers"],
+                min_scale=data["min_scale"],
+                max_scale=data["max_scale"],
+                input_size_height=data["input_size_height"],
+                input_size_width=data["input_size_width"],
+                anchor_offset_x=data["anchor_offset_x"],
+                anchor_offset_y=data["anchor_offset_y"],
+                strides=data["strides"],
+                aspect_ratios=data["aspect_ratios"],
+                reduce_boxes_in_lowest_layer=data["reduce_boxes_in_lowest_layer"],
+                interpolated_scale_aspect_ratio=data["interpolated_scale_aspect_ratio"],
+                fixed_anchor_size=data["fixed_anchor_size"],
+            )
+        except KeyError as e:
+            raise ValueError(f"Missing required anchor generation option key: {e}") from e
+
+
+@dataclass(frozen=True)
+class PalmDetectionModelConfig:
+    """Numeric parameters for decoding palm detection outputs (model_info[1] in the config JSON)."""
+
+    num_coords: int
+    num_anchors: int
+    score_clipping_thresh: float
+    x_scale: float
+    y_scale: float
+    h_scale: float
+    w_scale: float
+    min_score_thresh: float
+    min_suppression_threshold: float
+    num_keypoints: int
+    kp1: int
+    kp2: int
+    theta0: float
+    dy: float
+    dscale: float
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PalmDetectionModelConfig":
+        try:
+            return cls(
+                num_coords=data["num_coords"],
+                num_anchors=data["num_anchors"],
+                score_clipping_thresh=data["score_clipping_thresh"],
+                x_scale=data["x_scale"],
+                y_scale=data["y_scale"],
+                h_scale=data["h_scale"],
+                w_scale=data["w_scale"],
+                min_score_thresh=data["min_score_thresh"],
+                min_suppression_threshold=data["min_suppression_threshold"],
+                num_keypoints=data["num_keypoints"],
+                kp1=data["kp1"],
+                kp2=data["kp2"],
+                theta0=data["theta0"],
+                dy=data["dy"],
+                dscale=data["dscale"],
+            )
+        except KeyError as e:
+            raise ValueError(f"Missing required palm detection model config key: {e}") from e
 
 
 class ImagePostprocessorPalmDetection:
@@ -26,7 +109,7 @@ class ImagePostprocessorPalmDetection:
     scale: float
     pad: Tuple[float, float]
     anchors: NDArray[np.float32]
-    model_configs: Dict[str, Any]
+    model_configs: PalmDetectionModelConfig
 
     def __init__(
         self, params: Tuple[Tuple[float, float], Tuple[float, float]], configs: str
@@ -68,20 +151,20 @@ class ImagePostprocessorPalmDetection:
                     num_strides - 1.0
                 )
 
-        def generate_anchors(options: Dict[str, Any]) -> NDArray[np.float32]:
+        def generate_anchors(options: AnchorOptions) -> NDArray[np.float32]:
             """
             Generate anchor boxes based on provided options.
 
             Args:
-                options: Dictionary containing anchor generation parameters
+                options: Anchor generation parameters
 
             Returns:
                 Numpy array of generated anchors
             """
-            strides_size = len(options["strides"])
-            assert options["num_layers"] == strides_size
+            strides_size = len(options.strides)
+            assert options.num_layers == strides_size
 
-            anchors = []
+            anchor_list: List[List[float]] = []
             layer_id = 0
             while layer_id < strides_size:
                 anchor_height = []
@@ -92,12 +175,12 @@ class ImagePostprocessorPalmDetection:
                 # Process layers with the same stride
                 last_same_stride_layer = layer_id
                 while (last_same_stride_layer < strides_size) and (
-                    options["strides"][last_same_stride_layer]
-                    == options["strides"][layer_id]
+                    options.strides[last_same_stride_layer]
+                    == options.strides[layer_id]
                 ):
                     scale = calculate_scale(
-                        options["min_scale"],
-                        options["max_scale"],
+                        options.min_scale,
+                        options.max_scale,
                         last_same_stride_layer,
                         strides_size,
                     )
@@ -105,7 +188,7 @@ class ImagePostprocessorPalmDetection:
                     # Special handling for the lowest layer
                     if (
                         last_same_stride_layer == 0
-                        and options["reduce_boxes_in_lowest_layer"]
+                        and options.reduce_boxes_in_lowest_layer
                     ):
                         aspect_ratios.append(1.0)
                         aspect_ratios.append(2.0)
@@ -115,25 +198,25 @@ class ImagePostprocessorPalmDetection:
                         scales.append(scale)
                     else:
                         # Add anchors for all aspect ratios
-                        for aspect_ratio in options["aspect_ratios"]:
+                        for aspect_ratio in options.aspect_ratios:
                             aspect_ratios.append(aspect_ratio)
                             scales.append(scale)
 
                         # Add an additional anchor if interpolated_scale_aspect_ratio is specified
-                        if options["interpolated_scale_aspect_ratio"] > 0.0:
+                        if options.interpolated_scale_aspect_ratio > 0.0:
                             scale_next = (
                                 1.0
                                 if last_same_stride_layer == strides_size - 1
                                 else calculate_scale(
-                                    options["min_scale"],
-                                    options["max_scale"],
+                                    options.min_scale,
+                                    options.max_scale,
                                     last_same_stride_layer + 1,
                                     strides_size,
                                 )
                             )
                             scales.append(np.sqrt(scale * scale_next))
                             aspect_ratios.append(
-                                options["interpolated_scale_aspect_ratio"]
+                                options.interpolated_scale_aspect_ratio
                             )
 
                     last_same_stride_layer += 1
@@ -145,34 +228,33 @@ class ImagePostprocessorPalmDetection:
                     anchor_width.append(scales[i] * ratio_sqrts)
 
                 # Create anchors for the current feature map
-                stride = options["strides"][layer_id]
-                feature_map_height = int(np.ceil(options["input_size_height"] / stride))
-                feature_map_width = int(np.ceil(options["input_size_width"] / stride))
+                stride = options.strides[layer_id]
+                feature_map_height = int(np.ceil(options.input_size_height / stride))
+                feature_map_width = int(np.ceil(options.input_size_width / stride))
 
                 for y in range(feature_map_height):
                     for x in range(feature_map_width):
                         for anchor_id in range(len(anchor_height)):
                             # Calculate anchor center positions
                             x_center = (
-                                x + options["anchor_offset_x"]
+                                x + options.anchor_offset_x
                             ) / feature_map_width
                             y_center = (
-                                y + options["anchor_offset_y"]
+                                y + options.anchor_offset_y
                             ) / feature_map_height
 
                             new_anchor = [x_center, y_center, 0, 0]
-                            if options["fixed_anchor_size"]:
+                            if options.fixed_anchor_size:
                                 new_anchor[2] = 1.0
                                 new_anchor[3] = 1.0
                             else:
                                 new_anchor[2] = anchor_width[anchor_id]
                                 new_anchor[3] = anchor_height[anchor_id]
-                            anchors.append(new_anchor)
+                            anchor_list.append(new_anchor)
 
                 layer_id = last_same_stride_layer
 
-            anchors = np.asarray(anchors, dtype=np.float32)
-            return anchors
+            return np.asarray(anchor_list, dtype=np.float32)
 
         # Initialize instance variables
         self.scale = params[0][0]
@@ -189,9 +271,20 @@ class ImagePostprocessorPalmDetection:
         except json.JSONDecodeError:
             raise ValueError("Error decoding the label JSON file.")
 
+        if not isinstance(model_info, list) or len(model_info) != 2:
+            got = (
+                f"list of length {len(model_info)}"
+                if isinstance(model_info, list)
+                else type(model_info).__name__
+            )
+            raise ValueError(
+                f"{configs}: expected a 2-element JSON list "
+                f"[anchor_options, model_config], got {got}"
+            )
+
         # Generate anchors based on model configuration
-        self.anchors = generate_anchors(model_info[0])
-        self.model_configs = model_info[1]
+        self.anchors = generate_anchors(AnchorOptions.from_dict(model_info[0]))
+        self.model_configs = PalmDetectionModelConfig.from_dict(model_info[1])
 
     def _weighted_non_max_suppression(
         self, detections: NDArray[np.float32]
@@ -224,16 +317,20 @@ class ImagePostprocessorPalmDetection:
             """
             A = box_a.shape[0]
             B = box_b.shape[0]
-            max_xy = np.minimum(
+            # np.repeat/np.minimum/np.maximum/np.clip's stubs don't propagate
+            # the float32 dtype through to their return type, so pin it
+            # explicitly at each step rather than letting mypy (and NumPy's
+            # own promotion rules) silently widen to float64.
+            max_xy: NDArray[np.float32] = np.minimum(
                 np.repeat(np.expand_dims(box_a[:, 2:], axis=1), B, axis=1),
                 np.repeat(np.expand_dims(box_b[:, 2:], axis=0), A, axis=0),
             )
-            min_xy = np.maximum(
+            min_xy: NDArray[np.float32] = np.maximum(
                 np.repeat(np.expand_dims(box_a[:, :2], axis=1), B, axis=1),
                 np.repeat(np.expand_dims(box_b[:, :2], axis=0), A, axis=0),
             )
-            inter = np.clip((max_xy - min_xy), 0, None)
-            return inter[:, :, 0] * inter[:, :, 1]
+            inter: NDArray[np.float32] = np.clip((max_xy - min_xy), 0, None)
+            return (inter[:, :, 0] * inter[:, :, 1]).astype(np.float32)
 
         def jaccard(
             box_a: NDArray[np.float32], box_b: NDArray[np.float32]
@@ -264,7 +361,7 @@ class ImagePostprocessorPalmDetection:
                 axis=0,
             )
             union = area_a + area_b - inter
-            return inter / union
+            return (inter / union).astype(np.float32)
 
         def overlap_similarity(
             box: NDArray[np.float32], other_boxes: NDArray[np.float32]
@@ -287,7 +384,7 @@ class ImagePostprocessorPalmDetection:
 
         output_detections: List[NDArray[np.float32]] = []
         # Sort detections by score (highest first)
-        remaining = np.argsort(detections[:, self.model_configs["num_coords"]])[::-1]
+        remaining = np.argsort(detections[:, self.model_configs.num_coords])[::-1]
 
         # Process detections until none remain
         while len(remaining) > 0:
@@ -299,7 +396,7 @@ class ImagePostprocessorPalmDetection:
             ious = overlap_similarity(first_box, other_boxes)
 
             # Identify overlapping boxes
-            mask = ious > self.model_configs["min_suppression_threshold"]
+            mask = ious > self.model_configs.min_suppression_threshold
             overlapping = remaining[mask]
             remaining = remaining[~mask]
 
@@ -307,17 +404,17 @@ class ImagePostprocessorPalmDetection:
             weighted_detection = detection.copy()
             if len(overlapping) > 1:
                 coordinates = detections[
-                    overlapping, : self.model_configs["num_coords"]
+                    overlapping, : self.model_configs.num_coords
                 ]
                 scores = detections[
                     overlapping,
-                    self.model_configs["num_coords"] : self.model_configs["num_coords"]
+                    self.model_configs.num_coords : self.model_configs.num_coords
                     + 1,
                 ]
                 total_score = scores.sum()
                 weighted = np.sum(coordinates * scores, axis=0) / total_score
-                weighted_detection[: self.model_configs["num_coords"]] = weighted
-                weighted_detection[self.model_configs["num_coords"]] = (
+                weighted_detection[: self.model_configs.num_coords] = weighted
+                weighted_detection[self.model_configs.num_coords] = (
                     total_score / len(overlapping)
                 )
 
@@ -342,31 +439,31 @@ class ImagePostprocessorPalmDetection:
 
         # Denormalize box coordinates (ymin, xmin, ymax, xmax)
         result[:, 0] = (
-            result[:, 0] * self.scale * self.model_configs["x_scale"] - self.pad[0]
+            result[:, 0] * self.scale * self.model_configs.x_scale - self.pad[0]
         )
         result[:, 1] = (
-            result[:, 1] * self.scale * self.model_configs["x_scale"] - self.pad[1]
+            result[:, 1] * self.scale * self.model_configs.x_scale - self.pad[1]
         )
         result[:, 2] = (
-            result[:, 2] * self.scale * self.model_configs["x_scale"] - self.pad[0]
+            result[:, 2] * self.scale * self.model_configs.x_scale - self.pad[0]
         )
         result[:, 3] = (
-            result[:, 3] * self.scale * self.model_configs["x_scale"] - self.pad[1]
+            result[:, 3] * self.scale * self.model_configs.x_scale - self.pad[1]
         )
 
         # Denormalize keypoint coordinates (alternating x, y values)
         result[:, 4::2] = (
-            result[:, 4::2] * self.scale * self.model_configs["x_scale"] - self.pad[1]
+            result[:, 4::2] * self.scale * self.model_configs.x_scale - self.pad[1]
         )
         result[:, 5::2] = (
-            result[:, 5::2] * self.scale * self.model_configs["x_scale"] - self.pad[0]
+            result[:, 5::2] * self.scale * self.model_configs.x_scale - self.pad[0]
         )
 
         return result
 
     def postprocess_palm_detection(
         self, outputs: Dict[str, NDArray[np.float32]]
-    ) -> List[NDArray[np.float32]]:
+    ) -> NDArray[np.float32]:
         """
         Process model outputs to obtain palm detections.
 
@@ -374,7 +471,9 @@ class ImagePostprocessorPalmDetection:
             outputs: Dictionary of model output tensors
 
         Returns:
-            List of detected palms with their bounding boxes, keypoints, and scores
+            Array of detected palms (one row per detection) with their
+            bounding boxes, keypoints, and scores; zero rows if none were
+            detected.
 
         Raises:
             ValueError: If required output tensors are missing or if there's an error in reshaping
@@ -394,17 +493,17 @@ class ImagePostprocessorPalmDetection:
 
             # Decode center coordinates
             x_center = (
-                raw_boxes[..., 0] / self.model_configs["x_scale"] * self.anchors[:, 2]
+                raw_boxes[..., 0] / self.model_configs.x_scale * self.anchors[:, 2]
                 + self.anchors[:, 0]
             )
             y_center = (
-                raw_boxes[..., 1] / self.model_configs["y_scale"] * self.anchors[:, 3]
+                raw_boxes[..., 1] / self.model_configs.y_scale * self.anchors[:, 3]
                 + self.anchors[:, 1]
             )
 
             # Decode width and height
-            w = raw_boxes[..., 2] / self.model_configs["w_scale"] * self.anchors[:, 2]
-            h = raw_boxes[..., 3] / self.model_configs["h_scale"] * self.anchors[:, 3]
+            w = raw_boxes[..., 2] / self.model_configs.w_scale * self.anchors[:, 2]
+            h = raw_boxes[..., 3] / self.model_configs.h_scale * self.anchors[:, 3]
 
             # Convert to box coordinates (ymin, xmin, ymax, xmax)
             boxes[..., 0] = y_center - h / 2.0
@@ -413,17 +512,17 @@ class ImagePostprocessorPalmDetection:
             boxes[..., 3] = x_center + w / 2.0
 
             # Decode keypoint coordinates
-            for k in range(self.model_configs["num_keypoints"]):
+            for k in range(self.model_configs.num_keypoints):
                 offset = 4 + k * 2
                 keypoint_x = (
                     raw_boxes[..., offset]
-                    / self.model_configs["x_scale"]
+                    / self.model_configs.x_scale
                     * self.anchors[:, 2]
                     + self.anchors[:, 0]
                 )
                 keypoint_y = (
                     raw_boxes[..., offset + 1]
-                    / self.model_configs["y_scale"]
+                    / self.model_configs.y_scale
                     * self.anchors[:, 3]
                     + self.anchors[:, 1]
                 )
@@ -449,13 +548,13 @@ class ImagePostprocessorPalmDetection:
             detection_boxes = _decode_boxes(raw_box_tensor)
 
             # Apply sigmoid to scores and filter by threshold
-            thresh = self.model_configs["score_clipping_thresh"]
+            thresh = self.model_configs.score_clipping_thresh
             clipped_score_tensor = np.clip(raw_score_tensor, -thresh, thresh)
             detection_scores = 1 / (1 + np.exp(-clipped_score_tensor))
             detection_scores = np.squeeze(detection_scores, axis=-1)
 
             # Filter detections by score threshold
-            mask = detection_scores >= self.model_configs["min_score_thresh"]
+            mask = detection_scores >= self.model_configs.min_score_thresh
 
             # Combine boxes and scores for each batch
             output_detections: List[NDArray[np.float32]] = []
@@ -494,12 +593,12 @@ class ImagePostprocessorPalmDetection:
 
         # Verify tensor shapes
         assert out1.shape[0] == 1
-        assert out1.shape[1] == self.model_configs["num_anchors"]
+        assert out1.shape[1] == self.model_configs.num_anchors
         assert out1.shape[2] == 1
 
         assert out2.shape[0] == 1
-        assert out2.shape[1] == self.model_configs["num_anchors"]
-        assert out2.shape[2] == self.model_configs["num_coords"]
+        assert out2.shape[1] == self.model_configs.num_anchors
+        assert out2.shape[2] == self.model_configs.num_coords
 
         # Convert tensors to detections
         detections = _tensors_to_detections(out2, out1)
@@ -511,11 +610,19 @@ class ImagePostprocessorPalmDetection:
             if len(wnms_detections) > 0:
                 filtered_detections.append(wnms_detections)
 
-        # Extract detections for the first batch (assumes batch size of 1)
+        # Extract detections for the first batch (assumes batch size of 1).
+        # Always return an ndarray (zero-row when there are no detections)
+        # rather than switching to a plain list - callers only ever call
+        # len()/indexing on this, and a type-changing return doesn't have a
+        # clean Rust/C++ analogue (Option<Array2<f32>> or a zero-length array
+        # would be the equivalent there).
+        normalized_detections: NDArray[np.float32]
         if len(filtered_detections) > 0:
             normalized_detections = np.array(filtered_detections, dtype=np.float32)[0]
         else:
-            normalized_detections = []
+            normalized_detections = np.zeros(
+                (0, self.model_configs.num_coords + 1), dtype=np.float32
+            )
 
         return normalized_detections
 
@@ -604,17 +711,26 @@ class ImagePostprocessorPalmDetection:
         scale = detection[:, 3] - detection[:, 1]  # Width of the bounding box
 
         # Apply offset and scaling based on model configuration
-        yc += self.model_configs["dy"] * scale
-        scale *= self.model_configs["dscale"]
+        yc += self.model_configs.dy * scale
+        scale *= self.model_configs.dscale
 
         # Calculate rotation angle based on keypoints
-        x0 = detection[:, 4 + 2 * self.model_configs["kp1"]]
-        y0 = detection[:, 4 + 2 * self.model_configs["kp1"] + 1]
-        x1 = detection[:, 4 + 2 * self.model_configs["kp2"]]
-        y1 = detection[:, 4 + 2 * self.model_configs["kp2"] + 1]
-        theta = np.arctan2(y0 - y1, x0 - x1) - self.model_configs["theta0"]
+        x0 = detection[:, 4 + 2 * self.model_configs.kp1]
+        y0 = detection[:, 4 + 2 * self.model_configs.kp1 + 1]
+        x1 = detection[:, 4 + 2 * self.model_configs.kp2]
+        y1 = detection[:, 4 + 2 * self.model_configs.kp2 + 1]
+        theta = np.arctan2(y0 - y1, x0 - x1) - self.model_configs.theta0
 
-        return xc, yc, scale, theta
+        # dy/dscale/theta0 are Python floats from the config JSON; explicitly
+        # pin the dtype back to float32 rather than letting it drift to
+        # float64, since Rust/C++ won't silently widen precision the way
+        # NumPy can.
+        return (
+            xc.astype(np.float32),
+            yc.astype(np.float32),
+            scale.astype(np.float32),
+            theta.astype(np.float32),
+        )
 
     def extract_roi(
         self,
@@ -642,8 +758,7 @@ class ImagePostprocessorPalmDetection:
         points = np.array([[-1, -1, 1, 1], [-1, 1, -1, 1]], dtype=np.float32)
 
         # Apply scaling
-        points = points * scaleN / 2
-        points = points.astype(np.float32)
+        points = (points * scaleN / 2).astype(np.float32)
 
         # Create rotation matrices for each detection
         R = np.zeros((theta.shape[0], 2, 2), dtype=np.float32)
@@ -659,8 +774,7 @@ class ImagePostprocessorPalmDetection:
         center = np.expand_dims(center, axis=-1)
 
         # Apply rotation and translation
-        points = np.matmul(R, points) + center
-        points = points.astype(np.float32)
+        points = (np.matmul(R, points) + center).astype(np.float32)
 
         return points
 

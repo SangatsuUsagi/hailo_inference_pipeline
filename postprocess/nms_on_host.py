@@ -10,10 +10,56 @@ visual styling for different object classes.
 
 import colorsys
 import json
-from typing import Dict, List, Tuple, Union
+from dataclasses import dataclass
+from typing import Any, Dict, List, NamedTuple, Tuple
 
 import cv2
 import numpy as np
+
+
+@dataclass(frozen=True)
+class NmsModelConfig:
+    """Preprocessing parameters read from a nms_on_host config file's model_info[0]."""
+
+    input_shape: Tuple[int, int]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "NmsModelConfig":
+        try:
+            shape = data["preprocessing"]["input_shape"]
+        except KeyError as e:
+            raise ValueError(f"Missing required nms_on_host model config key: {e}") from e
+        return cls(input_shape=(shape[0], shape[1]))
+
+
+@dataclass(frozen=True)
+class NmsConfigFile:
+    """Parsed nms_on_host config file: a 2-element JSON list of [model_config, labels]."""
+
+    model_config: NmsModelConfig
+    labels: Dict[str, str]
+
+    @classmethod
+    def load(cls, path: str) -> "NmsConfigFile":
+        with open(path, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, list) or len(data) != 2:
+            got = f"list of length {len(data)}" if isinstance(data, list) else type(data).__name__
+            raise ValueError(
+                f"{path}: expected a 2-element JSON list [model_config, labels], got {got}"
+            )
+        return cls(model_config=NmsModelConfig.from_dict(data[0]), labels=data[1])
+
+
+class Detection(NamedTuple):
+    """A single denormalized detection box, in image coordinates."""
+
+    class_id: int
+    y_min: float
+    x_min: float
+    y_max: float
+    x_max: float
+    confidence: float
 
 
 class ImagePostprocessorNmsOnHost:
@@ -92,13 +138,9 @@ class ImagePostprocessorNmsOnHost:
 
             return rgb_palette, complement_palette
 
-        # Load model configuration from JSON file
-        with open(configs, "r") as f:  # f is a TextIO
-            model_info: List = json.load(f)
-
-        # Extract model configuration and input shape
-        model_configs: Dict = model_info[0]
-        input_shape: List[int] = model_configs["preprocessing"]["input_shape"][:2]
+        # Load and validate model configuration from JSON file
+        config_file = NmsConfigFile.load(configs)
+        input_shape = config_file.model_config.input_shape
 
         # Store padding values for coordinate denormalization
         self.pads: Tuple[float, float] = params[1]
@@ -110,7 +152,7 @@ class ImagePostprocessorNmsOnHost:
             input_shape[1] * scale[1],
         )
         # Get class labels from model info
-        self.labels: Dict[str, str] = model_info[1]
+        self.labels: Dict[str, str] = config_file.labels
 
         # Generate color palettes for visualization
         self.palette_line: List[Tuple[int, int, int]]
@@ -135,7 +177,7 @@ class ImagePostprocessorNmsOnHost:
 
         def denormalize_detections(
             detections: Dict[str, List[np.ndarray]],
-        ) -> List[List[Union[int, float]]]:
+        ) -> List[Detection]:
             """
             Convert normalized detection coordinates to image coordinates.
 
@@ -143,8 +185,7 @@ class ImagePostprocessorNmsOnHost:
                 detections (Dict[str, List[np.ndarray]]): Dictionary of detection results.
 
             Returns:
-                List[List[Union[int, float]]]: List of bounding boxes with denormalized coordinates.
-                Each box contains [class_id, y_min, x_min, y_max, x_max, confidence].
+                List[Detection]: Bounding boxes with denormalized coordinates.
             """
             # Create scaling factor array for efficient vectorized computation
             array_factor: np.ndarray = np.array(
@@ -158,7 +199,7 @@ class ImagePostprocessorNmsOnHost:
             # Extract outputs from the detections dictionary
             _, outputs = list(detections.items())[0]
 
-            bounding_boxes: List[List[Union[int, float]]] = []
+            bounding_boxes: List[Detection] = []
 
             # Process each class's detections
             for class_id, output in enumerate(outputs):
@@ -166,29 +207,36 @@ class ImagePostprocessorNmsOnHost:
                     # Convert normalized coordinates to image coordinates:
                     # 1. Multiply by scaling factor to get to original image size
                     # 2. Subtract padding to compensate for letterboxing
-                    bounding_box: List[Union[int, float]] = [
-                        class_id,
-                        *(decoded_bbox[:-1] * array_factor - array_offset),
-                        decoded_bbox[-1],
-                    ]
-                    bounding_boxes.append(bounding_box)
+                    y_min, x_min, y_max, x_max = (
+                        decoded_bbox[:-1] * array_factor - array_offset
+                    )
+                    bounding_boxes.append(
+                        Detection(
+                            class_id,
+                            float(y_min),
+                            float(x_min),
+                            float(y_max),
+                            float(x_max),
+                            float(decoded_bbox[-1]),
+                        )
+                    )
 
             return bounding_boxes
 
         # Convert normalized coordinates to image coordinates
-        detections = denormalize_detections(detections)
+        denormalized_detections = denormalize_detections(detections)
 
         # Draw each detection on the frame
-        for detection in detections:
+        for detection in denormalized_detections:
             # Extract class ID from detection
-            label_id: int = int(detection[0])
+            label_id: int = detection.class_id
 
             # Extract confidence score
-            confidence: float = float(detection[5])
+            confidence: float = detection.confidence
 
             # Extract bounding box coordinates
-            top_left: Tuple[int, int] = (int(detection[2]), int(detection[1]))
-            bottom_right: Tuple[int, int] = (int(detection[4]), int(detection[3]))
+            top_left: Tuple[int, int] = (int(detection.x_min), int(detection.y_min))
+            bottom_right: Tuple[int, int] = (int(detection.x_max), int(detection.y_max))
 
             # Draw bounding box rectangle
             cv2.rectangle(
